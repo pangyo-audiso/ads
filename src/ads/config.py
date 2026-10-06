@@ -19,7 +19,7 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class AdsSection:
-    tmux_socket: str = "ads"
+    tmux_socket: str = "ads"  # socket PREFIX: a project's cell runs on `tmux -L <prefix>-<name>`
     tmux_prefix: str = "C-a"
     attach: bool = True
     claude_bin: str = "claude"
@@ -54,7 +54,7 @@ class ProtocolCfg:
 @dataclass(frozen=True)
 class EditorCfg:
     vi_mode: bool = True
-    history_file: str = "work/input_history"
+    history_file: str = "work/input_history"  # relative to the project state dir
 
 
 DEFAULT_AGENTS: dict[str, AgentCfg] = {

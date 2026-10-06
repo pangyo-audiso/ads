@@ -1,8 +1,10 @@
 # Troubleshooting ads
 
-Start every investigation with `ads status`, which shows each agent's state and reason, inflight message, queued/held counts, open tasks with their nudges, supersede pending, phase, supervisor liveness, and alerts. Then look at the logs. The mechanics behind each state are described in `docs/protocol.md`.
+Start every investigation with `ads list` (which projects exist, which run, on which socket) and `ads status -p <name>`, which shows each agent's state and reason, inflight message, queued/held counts, open tasks with their nudges, supersede pending, phase, supervisor liveness, and alerts. Then look at the logs. The mechanics behind each state are described in `docs/protocol.md`.
 
 ## Where to look
+
+Each project has its own state dir `S = <runtime>/projects/<name>/` (see `ads list --json` → `state_dir`) and its own tmux server `ads-<name>`. All paths below are relative to `S`.
 
 | What | Where |
 |---|---|
@@ -15,16 +17,20 @@ Start every investigation with `ads status`, which shows each agent's state and 
 | An agent's state | `work/state/<agent>.json` |
 | An agent's reply drafts and chunk files | `work/agents/<agent>/` |
 | Unrecoverable errors and failed deliveries | `work/run/alerts/*.json` |
-| Screen of an agent, without attaching | `tmux -L ads capture-pane -p -t <pane id>` (ids in `work/run/panes.json`) |
+| The cell's socket, session and project path | `work/run/session.json`, `project.json` |
+| The project's Lab Notes, plans | `CLAUDE.md`, `plan/`, `plan/drafts/`, `work/reviews/` |
+| Screen of an agent, without attaching | `tmux -L ads-<name> capture-pane -p -t <pane id>` (ids in `work/run/panes.json`) |
 
 Useful one-liners:
 
 ```bash
-ads status                                   # or --json
-tail -f work/logs/supervisor.log
-grep '"error"' work/logs/hooks.log | tail     # hook tracebacks
-jq -c 'select(.event=="created") | [.id,.from,.to,.type,.status]' work/logs/bus.jsonl
-tmux -L ads capture-pane -p -t "$(jq -r .planner work/run/panes.json)" | tail -30
+ads list                                     # projects, running?, sockets
+ads status -p myproject                      # or --json
+S=projects/myproject                         # from the ads folder
+tail -f $S/work/logs/supervisor.log
+grep '"error"' $S/work/logs/hooks.log | tail     # hook tracebacks
+jq -c 'select(.event=="created") | [.id,.from,.to,.type,.status]' $S/work/logs/bus.jsonl
+tmux -L ads-myproject capture-pane -p -t "$(jq -r .planner $S/work/run/panes.json)" | tail -30
 ```
 
 ## An agent is stuck
@@ -61,27 +67,33 @@ The state clears on the next hook or watchdog pass. A `*-stuck` reason means the
 | `delivered` + `"unconfirmed": true` | The agent went busy but no prompt-submit hook arrived. Check `hooks.log` for errors. The `settings.json` hooks must point at an executable `ads` (`ads doctor`: "hook binary"). |
 | `superseded` / `ignored` | The task was cancelled, or this was a late reply to a cancelled task. Nothing to do. |
 
-The supervisor itself shows `supervisor: not running (stale pid …)` in `ads status`. Run `ads restart supervisor`. It respawns tmux window 2, adopts the running agents without relaunching them, and requeues stale `delivering` messages.
+The supervisor itself shows `supervisor: not running (stale pid …)` in `ads status`. Run `ads restart supervisor -p <name>`. It respawns tmux window 2, adopts the running agents without relaunching them, and requeues stale `delivering` messages.
 
 ## Restarting things
+
+Add `-p <name>` when the project is ambiguous (outside the project folder, several cells running):
 
 ```bash
 ads restart planner              # fresh Claude session (new session id)
 ads restart planner --resume     # same conversation (claude --resume <uuid>)
 ads restart human                # the editor in window 0 pane 3 (e.g. after C-c C-c)
 ads restart supervisor           # window 2; agents are adopted, not relaunched
-ads stop && ads <project> --resume   # whole cell, keeping every agent's conversation
+ads stop -p <name> && ads <project> --resume   # whole cell, keeping every agent's conversation
+ads stop --all                   # every running cell of this runtime
 ```
 
-The editor offers the same commands: `/ads restart <agent>|supervisor [--resume]`.
+The editor offers the same commands for its own project: `/ads restart <agent>|supervisor [--resume]`.
 
-Agent files (`work/agents/<agent>/settings.json`, `system-prompt.md`) are re-rendered on each launch by the **supervisor process**. Prompt files (`src/ads/prompts/*.md`, `.claude/ads/prompts/*.md`) are read from disk at render time, so `ads restart <agent>` picks up their changes. Changes to Python code, such as `launcher.py`, take effect only in a new supervisor. Run `ads restart supervisor` first, then `ads restart <agent>`.
+Agent files (`S/work/agents/<agent>/settings.json`, `system-prompt.md`) are re-rendered on each launch by the **supervisor process**. Prompt files (`src/ads/prompts/*.md`, `.claude/ads/prompts/*.md`) are read from disk at render time, so `ads restart <agent>` picks up their changes. Changes to Python code, such as `launcher.py`, take effect only in a new supervisor. Run `ads restart supervisor` first, then `ads restart <agent>`.
 
 A restarted agent's open tasks are not failed; only a dead pane (`down(pane_dead)`) fails them. If the agent lost the work (fresh session), the sender must resend it, or you can supersede the open task.
 
 ## Startup problems
 
-- **"this runtime already runs a cell":** a runtime runs one project at a time. Run `ads stop`, or `ads <project> --attach`.
+- **Several projects at once are fine:** each runs on its own server `ads-<name>`. Only a second cell for the **same** project is refused (next item).
+- **"no project selected" / "several projects are running" / "unknown project":** pass `-p <name|path>` (names are in `ads list`), or run the command from inside the project folder. Inside a cell (agents, editor) the project comes from `$ADS_STATE_DIR`.
+- **A project got a name like `app-1a2b3c`:** another project folder with the same basename was registered first; the suffix is the first 6 hex digits of sha1 of the absolute path. The mapping is in `projects/*/project.json`.
+- **`ads <name>` created the folder somewhere unexpected:** a bare name (no `/`, not starting with `~` or `.`/`..`) is a sibling of the ads folder (`<runtime>/../<name>`). Use `./name` for a folder relative to the current directory. ads prints `project: <path>` first.
 - **"existing session … use --attach or --restart":** without a terminal, ads will not prompt. Pass one of the two flags.
 - **Trust dialog on every new project folder:** this is expected the first time for each folder. The watchdog answers it (`supervisor.log`: `<agent>: trust dialog answered`), and Claude Code then saves `hasTrustDialogAccepted` for that folder in `~/.claude.json`.
 - **Bypass-permissions dialog:** this appears only on a user's very first `--dangerously-skip-permissions` launch. After the watchdog accepts it, Claude Code saves `skipDangerousModePermissionPrompt: true` in `~/.claude/settings.json`, so the dialog never appears again for that user.
@@ -96,12 +108,12 @@ A restarted agent's open tasks are not failed; only a dead pane (`down(pane_dead
   set -s extended-keys on
   set -as terminal-features 'xterm*:extkeys'
   ```
-  Run `ads doctor --key-probe`, or `/ads keys` in the editor, to see which bytes your keys send. `ads doctor` warns when nested, and when the running ads server lacks `extended-keys on`.
+  Run `ads doctor --key-probe`, or `/ads keys` in the editor, to see which bytes your keys send. `ads doctor` warns when nested, and when a running ads server (`ads-<name>`) lacks `extended-keys on`.
 - **Prefix keys:** the ads server uses `C-a`, so your outer tmux keeps `C-b`. Change it with `[ads] tmux_prefix`.
 - **C-c in the editor** clears the text. Pressing it twice within 1 s exits the editor; `ads restart human` brings it back.
 
 ## Agents behave oddly
 
-- **Agents answer in Korean, or call you by a nickname:** they load your global `~/.claude/CLAUDE.md` as well as the runtime `CLAUDE.md`. This is expected.
-- **An agent repeats a mistake:** record the lesson with `ads note "…"`. Every agent re-reads `## Lab Notes` at the start of each task.
-- **An agent edits files it should not:** the role prompts forbid `src/ads/` and `work/` of the runtime and, for developer, all code edits. Check `bus.jsonl` for who did what, and add a Lab Note. Per-role prompt overrides go in `<runtime>/.claude/ads/prompts/<role>.md`.
+- **Agents answer in Korean, or call you by a nickname:** they load your global `~/.claude/CLAUDE.md` as well as their project's `projects/<name>/CLAUDE.md`. This is expected. They do not load the ads repo's own `CLAUDE.md`.
+- **An agent repeats a mistake:** record the lesson with `ads note -p <name> "…"`. Every agent of that project re-reads its `## Lab Notes` at the start of each task. Notes are per project; a lesson that applies everywhere must be noted in each project (or put in a prompt override).
+- **An agent edits files it should not:** the role prompts forbid `src/ads/` of the runtime and the project's `work/` (other than their own files) and, for developer, all code edits. Check `bus.jsonl` for who did what, and add a Lab Note. Per-role prompt overrides go in `<runtime>/.claude/ads/prompts/<role>.md`.

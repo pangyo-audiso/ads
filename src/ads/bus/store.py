@@ -16,7 +16,7 @@ from typing import Any
 from ads.bus import envelope as env
 from ads.bus.envelope import Message
 from ads.bus.log import log_event
-from ads.paths import Runtime, locked_json
+from ads.paths import ProjectState, StateLike, as_state, locked_json
 
 # Legal status transitions. Terminal statuses map to an empty set.
 # `failed -> queued` is the `ads send --requeue <id>` path; `delivering -> queued` is
@@ -47,20 +47,20 @@ class MessageNotFound(KeyError):
     """No envelope for that id."""
 
 
-def _rt(runtime: Runtime | Path | str) -> Runtime:
-    return runtime if isinstance(runtime, Runtime) else Runtime(Path(runtime))
+def _rt(state: StateLike) -> ProjectState:
+    return as_state(state)
 
 
 def can_transition(old: str, new: str) -> bool:
     return new in TRANSITIONS.get(old, frozenset())
 
 
-def envelope_path(runtime: Runtime | Path | str, msg_id: str) -> Path:
-    return _rt(runtime).msgs / f"{msg_id}.json"
+def envelope_path(state: StateLike, msg_id: str) -> Path:
+    return _rt(state).msgs / f"{msg_id}.json"
 
 
-def body_path(runtime: Runtime | Path | str, msg_id: str) -> Path:
-    return env.body_path(_rt(runtime), msg_id)
+def body_path(state: StateLike, msg_id: str) -> Path:
+    return env.body_path(_rt(state), msg_id)
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -77,19 +77,19 @@ def _atomic_write(path: Path, text: str) -> None:
 
 # --- seq ----------------------------------------------------------------------------
 
-def _max_stored_seq(rt: Runtime) -> int:
+def _max_stored_seq(rt: ProjectState) -> int:
     best = 0
     for m in all_messages(rt):
         best = max(best, m.seq)
     return best
 
 
-def next_seq(runtime: Runtime | Path | str) -> int:
+def next_seq(state: StateLike) -> int:
     """Next value of the global monotonic counter `work/run/seq` (flock; never resets).
 
     If the counter file is missing, it is seeded from the highest stored message seq.
     """
-    rt = _rt(runtime)
+    rt = _rt(state)
     rt.run.mkdir(parents=True, exist_ok=True)
     lock_path = rt.seq.with_name(rt.seq.name + ".lock")
     with open(lock_path, "a") as lock:
@@ -109,7 +109,7 @@ def next_seq(runtime: Runtime | Path | str) -> int:
 # --- create / get / update ------------------------------------------------------------
 
 def create(
-    runtime: Runtime | Path | str,
+    state: StateLike,
     *,
     from_: str,
     to: str,
@@ -128,7 +128,7 @@ def create(
     **log_extra: Any,
 ) -> Message:
     """Allocate a seq, write `<id>.md` then `<id>.json` (atomic), log `created`."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     if status not in INITIAL_STATUSES:
         raise TransitionError(f"cannot create a message with status {status!r}")
     now = now or datetime.now().astimezone()
@@ -159,26 +159,26 @@ def create(
     return msg
 
 
-def get(runtime: Runtime | Path | str, msg_id: str) -> Message:
+def get(state: StateLike, msg_id: str) -> Message:
     try:
-        data = json.loads(envelope_path(runtime, msg_id).read_text())
+        data = json.loads(envelope_path(state, msg_id).read_text())
     except FileNotFoundError:
         raise MessageNotFound(msg_id) from None
     return Message.from_dict(data)
 
 
-def read_body(runtime: Runtime | Path | str, msg_id: str) -> str:
-    return body_path(runtime, msg_id).read_bytes().decode("utf-8")
+def read_body(state: StateLike, msg_id: str) -> str:
+    return body_path(state, msg_id).read_bytes().decode("utf-8")
 
 
-def update(runtime: Runtime | Path | str, msg_id: str, *, log_extra: dict[str, Any] | None = None,
+def update(state: StateLike, msg_id: str, *, log_extra: dict[str, Any] | None = None,
            _bump: dict[str, int] | None = None, **fields: Any) -> Message:
     """Atomically update envelope fields under `locked_json`.
 
     A `status` change must be legal per TRANSITIONS (same status = no transition) and is
     logged to bus.jsonl as event `status:<new>`. Entering `delivered` stamps `delivered_at`.
     """
-    rt = _rt(runtime)
+    rt = _rt(state)
     if "from" in fields:
         fields["from_"] = fields.pop("from")
     bad = set(fields) - _FIELDS
@@ -216,17 +216,17 @@ def update(runtime: Runtime | Path | str, msg_id: str, *, log_extra: dict[str, A
     return msg
 
 
-def bump(runtime: Runtime | Path | str, msg_id: str, field: str, by: int = 1,
+def bump(state: StateLike, msg_id: str, field: str, by: int = 1,
          **fields: Any) -> Message:
     """Atomically increment `enters` or `pastes` (plus optional other field updates)."""
-    return update(runtime, msg_id, _bump={field: by}, **fields)
+    return update(state, msg_id, _bump={field: by}, **fields)
 
 
 # --- queries --------------------------------------------------------------------------
 
-def all_messages(runtime: Runtime | Path | str) -> list[Message]:
+def all_messages(state: StateLike) -> list[Message]:
     """Every stored message, sorted by seq."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     out = []
     for p in rt.msgs.glob("m-*.json"):
         try:
@@ -237,13 +237,13 @@ def all_messages(runtime: Runtime | Path | str) -> list[Message]:
     return out
 
 
-def queued_for(runtime: Runtime | Path | str, agent: str) -> list[Message]:
-    return [m for m in all_messages(runtime) if m.to == agent and m.status == "queued"]
+def queued_for(state: StateLike, agent: str) -> list[Message]:
+    return [m for m in all_messages(state) if m.to == agent and m.status == "queued"]
 
 
-def held_all(runtime: Runtime | Path | str) -> list[Message]:
-    return [m for m in all_messages(runtime) if m.status == "held"]
+def held_all(state: StateLike) -> list[Message]:
+    return [m for m in all_messages(state) if m.status == "held"]
 
 
-def inflight_for(runtime: Runtime | Path | str, agent: str) -> list[Message]:
-    return [m for m in all_messages(runtime) if m.to == agent and m.status == "delivering"]
+def inflight_for(state: StateLike, agent: str) -> list[Message]:
+    return [m for m in all_messages(state) if m.to == agent and m.status == "delivering"]

@@ -1,4 +1,5 @@
-"""Per-agent Claude Code launch files, argv and env (plan §4.1). Pure apart from writing work/agents/<a>/."""
+"""Per-agent Claude Code launch files, argv and env (plan §4.1). Pure apart from writing
+<state>/work/agents/<a>/ (state = <runtime>/projects/<name>, see ads.paths.ProjectState)."""
 
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from importlib import resources
 from pathlib import Path
 
 from ads.config import Config
-from ads.paths import AGENTS, Runtime
+from ads.paths import AGENTS, ProjectState, StateLike, as_state
 
 # hook event -> (ads hook sub-event, timeout seconds)
 HOOKS: dict[str, tuple[str, int]] = {
@@ -25,12 +26,12 @@ HOOKS: dict[str, tuple[str, int]] = {
 }
 
 DISALLOWED_TOOLS = ("AskUserQuestion", "EnterPlanMode", "ExitPlanMode")
-PLACEHOLDERS = ("agent", "role", "model", "runtime", "project", "ads_bin", "reports_to", "peers",
-                "max_review_rounds")
+PLACEHOLDERS = ("agent", "role", "model", "runtime", "state_dir", "project_name", "project",
+                "ads_bin", "reports_to", "peers", "max_review_rounds")
 
 
-def _rt(runtime: Runtime | Path | str) -> Runtime:
-    return runtime if isinstance(runtime, Runtime) else Runtime(Path(runtime).expanduser().absolute())
+def _rt(state: StateLike) -> ProjectState:
+    return as_state(state)
 
 
 def role_of(agent: str) -> str:
@@ -38,13 +39,13 @@ def role_of(agent: str) -> str:
     return re.sub(r"-\d+$", "", agent)
 
 
-def ads_bin(runtime: Runtime | Path | str) -> Path:
+def ads_bin(state: StateLike) -> Path:
     """Absolute path of the `ads` executable used in hook commands.
 
     Order: `<runtime>/.venv/bin/ads`, sibling of sys.executable, `shutil.which("ads")`.
     """
-    rt = _rt(runtime)
-    candidates = [rt.root / ".venv" / "bin" / "ads", Path(sys.executable).absolute().parent / "ads"]
+    rt = _rt(state)
+    candidates = [rt.runtime / ".venv" / "bin" / "ads", Path(sys.executable).absolute().parent / "ads"]
     which = shutil.which("ads")
     if which:
         candidates.append(Path(which).absolute())
@@ -58,15 +59,16 @@ def claude_bin(cfg: Config) -> str:
     return os.environ.get("ADS_CLAUDE_BIN") or cfg.ads.claude_bin
 
 
-def agent_env(cfg: Config, runtime: Runtime | Path | str, project: Path | str, agent: str,
+def agent_env(cfg: Config, state: StateLike, project: Path | str, agent: str,
               base_path: str | None = None) -> dict[str, str]:
     """Environment variables added to the agent process (and mirrored into settings.json `env`)."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     bin_ = ads_bin(rt)
     path = os.environ.get("PATH", "") if base_path is None else base_path
     return {
         "ADS_AGENT": agent,
-        "ADS_RUNTIME": str(rt.root),
+        "ADS_RUNTIME": str(rt.runtime),
+        "ADS_STATE_DIR": str(rt.dir),
         "ADS_PROJECT": str(Path(project).expanduser().absolute()),
         "ADS_BIN": str(bin_),
         "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1",
@@ -78,9 +80,9 @@ def agent_env(cfg: Config, runtime: Runtime | Path | str, project: Path | str, a
     }
 
 
-def settings_dict(cfg: Config, runtime: Runtime | Path | str, project: Path | str, agent: str) -> dict:
+def settings_dict(cfg: Config, state: StateLike, project: Path | str, agent: str) -> dict:
     """The exact settings.json document: autoMemoryEnabled, promptSuggestionEnabled, env, hooks."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     env = agent_env(cfg, rt, project, agent)
     env.pop("PATH")
     bin_ = ads_bin(rt)
@@ -101,9 +103,9 @@ def _packaged_prompt(name: str) -> str | None:
         return None
 
 
-def load_prompt(runtime: Runtime | Path | str, name: str) -> str | None:
+def load_prompt(state: StateLike, name: str) -> str | None:
     """Override `<runtime>/.claude/ads/prompts/<name>.md` wins over packaged `ads/prompts/<name>.md`."""
-    override = _rt(runtime).root / ".claude" / "ads" / "prompts" / f"{name}.md"
+    override = _rt(state).runtime / ".claude" / "ads" / "prompts" / f"{name}.md"
     if override.is_file():
         return override.read_text(encoding="utf-8")
     return _packaged_prompt(name)
@@ -123,14 +125,16 @@ def render_text(text: str, values: dict[str, str]) -> str:
     return re.sub(r"\{(" + "|".join(values) + r")\}", lambda m: values[m[1]], text)
 
 
-def render_prompt(cfg: Config, runtime: Runtime | Path | str, project: Path | str, agent: str) -> str:
-    rt = _rt(runtime)
+def render_prompt(cfg: Config, state: StateLike, project: Path | str, agent: str) -> str:
+    rt = _rt(state)
     a = cfg.agents[agent]
     values = {
         "agent": agent,
         "role": role_of(agent),
         "model": a.model,
-        "runtime": str(rt.root),
+        "runtime": str(rt.runtime),
+        "state_dir": str(rt.dir),
+        "project_name": rt.name,
         "project": str(Path(project).expanduser().absolute()),
         "ads_bin": str(ads_bin(rt)),
         "reports_to": a.reports_to,
@@ -143,10 +147,10 @@ def render_prompt(cfg: Config, runtime: Runtime | Path | str, project: Path | st
 
 # --- files ----------------------------------------------------------------------
 
-def render_agent_files(cfg: Config, runtime: Runtime | Path | str, project: Path | str,
+def render_agent_files(cfg: Config, state: StateLike, project: Path | str,
                        agent: str) -> tuple[Path, Path]:
     """Write work/agents/<a>/{settings.json,system-prompt.md}; return their paths."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     d = rt.agent_dir(agent)
     d.mkdir(parents=True, exist_ok=True)
     settings_path = d / "settings.json"
@@ -156,13 +160,13 @@ def render_agent_files(cfg: Config, runtime: Runtime | Path | str, project: Path
     return settings_path, prompt_path
 
 
-def session_file(runtime: Runtime | Path | str, agent: str) -> Path:
-    return _rt(runtime).agent_dir(agent) / "session.json"
+def session_file(state: StateLike, agent: str) -> Path:
+    return _rt(state).agent_dir(agent) / "session.json"
 
 
-def load_or_create_session_uuid(runtime: Runtime | Path | str, agent: str, fresh: bool = False) -> str:
+def load_or_create_session_uuid(state: StateLike, agent: str, fresh: bool = False) -> str:
     """Return the agent's persisted Claude session uuid, creating (or with fresh=True, replacing) it."""
-    path = session_file(runtime, agent)
+    path = session_file(state, agent)
     if not fresh:
         try:
             sid = json.loads(path.read_text()).get("session_id")
@@ -177,10 +181,10 @@ def load_or_create_session_uuid(runtime: Runtime | Path | str, agent: str, fresh
     return sid
 
 
-def claude_argv(cfg: Config, runtime: Runtime | Path | str, agent: str, session_uuid: str,
+def claude_argv(cfg: Config, state: StateLike, agent: str, session_uuid: str,
                 resume: bool = False) -> list[str]:
     """Full claude argv (cwd must be the project dir)."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     a = cfg.agents[agent]
     d = rt.agent_dir(agent)
     argv = [claude_bin(cfg), "--model", a.model]
@@ -188,7 +192,7 @@ def claude_argv(cfg: Config, runtime: Runtime | Path | str, agent: str, session_
         argv += ["--effort", a.effort]
     argv += [
         "--dangerously-skip-permissions",
-        "--add-dir", str(rt.root),
+        "--add-dir", str(rt.dir),
         "--settings", str(d / "settings.json"),
         "--append-system-prompt-file", str(d / "system-prompt.md"),
         "--disallowedTools", *DISALLOWED_TOOLS,

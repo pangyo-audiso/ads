@@ -10,13 +10,14 @@ import pytest
 from ads import cli
 from ads import start as S
 from ads.config import default_config
-from ads.paths import Runtime
+from ads.paths import ProjectState
 
 
 @pytest.fixture
-def rt(tmp_runtime: Path, monkeypatch) -> Runtime:
+def rt(tmp_runtime: Path, monkeypatch) -> Path:
+    """The runtime root (ADS_RUNTIME set)."""
     monkeypatch.setenv("ADS_RUNTIME", str(tmp_runtime))
-    return Runtime(tmp_runtime)
+    return tmp_runtime
 
 
 def test_normalize_bare_project() -> None:
@@ -92,19 +93,27 @@ def test_claude_md_lab_notes(tmp_path) -> None:
 def test_gitignore(tmp_path) -> None:
     gi = tmp_path / ".gitignore"
     gi.write_text("work\n*.pyc")
-    assert S.ensure_gitignore(gi) == [".venv/"]
-    assert gi.read_text() == "work\n*.pyc\n.venv/\n"
+    assert S.ensure_gitignore(gi) == ["projects/", ".venv/"]
+    assert gi.read_text() == "work\n*.pyc\nprojects/\n.venv/\n"
     assert S.ensure_gitignore(gi) == []
 
 
-def test_ensure_runtime(rt: Runtime) -> None:
+def test_ensure_runtime_and_state(rt: Path, tmp_path: Path) -> None:
     S.ensure_runtime(rt)
-    for d in (rt.plan / "drafts", rt.run, rt.msgs, rt.logs, rt.agent_dir("coder-2")):
-        assert d.is_dir()
-    assert "## Lab Notes" in rt.claude_md.read_text()
+    assert (rt / "projects").is_dir() and "projects/" in (rt / ".gitignore").read_text()
+    st = ProjectState.of(rt, "demo")
+    S.ensure_state(st, tmp_path / "demo")
+    for d in (st.plan / "drafts", st.run, st.msgs, st.logs, st.reviews, st.agent_dir("coder-2")):
+        assert d.is_dir() and d.is_relative_to(rt / "projects" / "demo")
+    text = st.claude_md.read_text()
+    assert text.startswith("# ads project memory: demo\n")
+    assert str(tmp_path / "demo") in text and "shared memory" in text
+    assert text.rstrip().endswith("## Lab Notes")
+    assert not (rt / "CLAUDE.md").exists() and not (rt / "work").exists()
 
 
-def test_supervisor_pid(rt: Runtime) -> None:
+def test_supervisor_pid(rt: Path) -> None:
+    rt = ProjectState.of(rt, "demo")
     rt.ensure()
     assert S.supervisor_pid(rt) is None
     rt.supervisor_pid.write_text("999999999\n")
@@ -115,19 +124,35 @@ def test_supervisor_pid(rt: Runtime) -> None:
     assert S.supervisor_pid(rt) is None
 
 
-def test_start_overlap_rejected(rt: Runtime, capsys) -> None:
-    code = cli.main(["start", str(rt.root / "sub"), "--yes", "--no-attach"])
+def test_start_overlap_rejected(rt: Path, capsys) -> None:
+    code = cli.main(["start", str(rt / "sub"), "--yes", "--no-attach"])
     assert code == 1 and "inside the runtime" in capsys.readouterr().err
 
 
-def test_start_declined_exit0(rt: Runtime, tmp_path, monkeypatch, capsys) -> None:
+def test_start_declined_exit0(rt: Path, tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(S, "_isatty", lambda: False)
     p = tmp_path / "nope"
     assert cli.main([str(p), "--no-attach"]) == 0
     assert not p.exists()
+    assert f"project: {p}" in capsys.readouterr().out
+    assert not (rt / "projects" / "nope").exists()  # nothing registered when declined
 
 
-def test_preflight_aborts_on_fail(rt: Runtime, tmp_path, monkeypatch) -> None:
+def test_start_bare_name_is_sibling_of_runtime(rt: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(S, "_isatty", lambda: False)
+    monkeypatch.chdir(rt)  # a bare name is NOT relative to the cwd
+    assert cli.main(["audiso-rag", "--no-attach"]) == 0
+    out = capsys.readouterr().out
+    sibling = rt.parent / "audiso-rag"
+    lines = out.splitlines()
+    assert lines[0] == f"project: {sibling}"
+    assert f"Project folder {sibling} does not exist" in out
+    # a path with a slash keeps the cwd-relative behaviour (and is rejected inside the runtime)
+    assert cli.main(["./audiso-rag", "--no-attach"]) == 1
+    assert "inside the runtime" in capsys.readouterr().err
+
+
+def test_preflight_aborts_on_fail(rt: Path, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(cli, "doctor_rows", lambda *a, **k: [
         (cli.PASS, "x", "ok"), (cli.WARN, "w", "careful"), (cli.FAIL, "claude", "missing")])
     out: list[str] = []

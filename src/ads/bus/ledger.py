@@ -24,7 +24,7 @@ from ads.bus import state as agent_state
 from ads.bus import store
 from ads.bus.envelope import MSG_TYPES, REPLY_TYPES, TASK_TYPES, Message, validate_result
 from ads.bus.log import log_event
-from ads.paths import AGENTS, HUMAN, Runtime, locked_json
+from ads.paths import AGENTS, HUMAN, ProjectState, StateLike, as_state, locked_json
 
 TASK_STATES: frozenset[str] = frozenset({"queued", "delivered", "closed", "superseded", "failed"})
 OPEN: frozenset[str] = frozenset({"queued", "delivered"})
@@ -46,8 +46,8 @@ class LedgerError(ValueError):
     """`ads send` validation failure (message is not created)."""
 
 
-def _rt(runtime: Runtime | Path | str) -> Runtime:
-    return runtime if isinstance(runtime, Runtime) else Runtime(Path(runtime))
+def _rt(state: StateLike) -> ProjectState:
+    return as_state(state)
 
 
 def _now() -> str:
@@ -60,10 +60,10 @@ _local = threading.local()
 
 
 @contextmanager
-def ledger_lock(runtime: Runtime | Path | str) -> Iterator[None]:
+def ledger_lock(state: StateLike) -> Iterator[None]:
     """Exclusive flock on `work/run/ledger.lock`; re-entrant within a thread."""
-    rt = _rt(runtime)
-    key = str(rt.root.resolve())
+    rt = _rt(state)
+    key = str(rt.dir.resolve())
     depth: dict[str, int] = _local.__dict__.setdefault("depth", {})
     if depth.get(key):
         depth[key] += 1
@@ -85,22 +85,22 @@ def ledger_lock(runtime: Runtime | Path | str) -> Iterator[None]:
 
 # --- task store -------------------------------------------------------------------------
 
-def task_path(runtime: Runtime | Path | str, task_id: str) -> Path:
-    return _rt(runtime).tasks / f"{task_id}.json"
+def task_path(state: StateLike, task_id: str) -> Path:
+    return _rt(state).tasks / f"{task_id}.json"
 
 
-def get_task(runtime: Runtime | Path | str, task_id: str) -> dict[str, Any] | None:
+def get_task(state: StateLike, task_id: str) -> dict[str, Any] | None:
     try:
-        data = json.loads(task_path(runtime, task_id).read_text())
+        data = json.loads(task_path(state, task_id).read_text())
     except (FileNotFoundError, ValueError):
         return None
     return data if isinstance(data, dict) and data else None
 
 
-def all_tasks(runtime: Runtime | Path | str) -> list[dict[str, Any]]:
+def all_tasks(state: StateLike) -> list[dict[str, Any]]:
     """Every task, sorted by seq."""
     out = []
-    for p in _rt(runtime).tasks.glob("m-*.json"):
+    for p in _rt(state).tasks.glob("m-*.json"):
         try:
             d = json.loads(p.read_text())
         except (OSError, ValueError):
@@ -111,21 +111,21 @@ def all_tasks(runtime: Runtime | Path | str) -> list[dict[str, Any]]:
     return out
 
 
-def open_tasks(runtime: Runtime | Path | str) -> list[dict[str, Any]]:
-    return [t for t in all_tasks(runtime) if t.get("state") in OPEN]
+def open_tasks(state: StateLike) -> list[dict[str, Any]]:
+    return [t for t in all_tasks(state) if t.get("state") in OPEN]
 
 
-def open_incoming(runtime: Runtime | Path | str, agent: str) -> list[dict[str, Any]]:
+def open_incoming(state: StateLike, agent: str) -> list[dict[str, Any]]:
     """Open tasks addressed to `agent` (by seq)."""
-    return [t for t in open_tasks(runtime) if t["to"] == agent]
+    return [t for t in open_tasks(state) if t["to"] == agent]
 
 
-def open_outgoing(runtime: Runtime | Path | str, agent: str) -> list[dict[str, Any]]:
+def open_outgoing(state: StateLike, agent: str) -> list[dict[str, Any]]:
     """Open tasks `agent` created (by seq)."""
-    return [t for t in open_tasks(runtime) if t["from"] == agent]
+    return [t for t in open_tasks(state) if t["from"] == agent]
 
 
-def _create_task(rt: Runtime, msg: Message) -> dict[str, Any]:
+def _create_task(rt: ProjectState, msg: Message) -> dict[str, Any]:
     task = {
         "id": msg.id, "seq": msg.seq, "from": msg.from_, "to": msg.to, "type": msg.type,
         "subject": msg.subject,
@@ -140,7 +140,7 @@ def _create_task(rt: Runtime, msg: Message) -> dict[str, Any]:
     return task
 
 
-def _update_task(rt: Runtime, task_id: str, **fields: Any) -> dict[str, Any]:
+def _update_task(rt: ProjectState, task_id: str, **fields: Any) -> dict[str, Any]:
     with locked_json(task_path(rt, task_id)) as data:
         if not data:
             raise KeyError(task_id)
@@ -156,15 +156,15 @@ def _update_task(rt: Runtime, task_id: str, **fields: Any) -> dict[str, Any]:
     return task
 
 
-def touch_poke(runtime: Runtime | Path | str) -> None:
-    rt = _rt(runtime)
+def touch_poke(state: StateLike) -> None:
+    rt = _rt(state)
     rt.run.mkdir(parents=True, exist_ok=True)
     rt.poke.touch()
 
 
 # --- hold / release ---------------------------------------------------------------------
 
-def hold_reason(runtime: Runtime | Path | str, msg: Message) -> str | None:
+def hold_reason(state: StateLike, msg: Message) -> str | None:
     """Id of the open task `msg` must wait behind, or None if it may be queued.
 
     Only instruct/review-request are held; from=human and --supersede bypass. msg's own task,
@@ -174,7 +174,7 @@ def hold_reason(runtime: Runtime | Path | str, msg: Message) -> str | None:
     """
     if msg.type not in HOLDABLE or msg.from_ == HUMAN or msg.supersedes:
         return None
-    rt = _rt(runtime)
+    rt = _rt(state)
     held_ids = {m.id for m in store.held_all(rt)}
     for t in open_tasks(rt):
         if t["id"] == msg.id or t["id"] in held_ids or t["from"] != msg.from_:
@@ -186,9 +186,9 @@ def hold_reason(runtime: Runtime | Path | str, msg: Message) -> str | None:
     return None
 
 
-def release_held(runtime: Runtime | Path | str) -> list[str]:
+def release_held(state: StateLike) -> list[str]:
     """Queue the oldest releasable held message, re-check the rest; repeat. Returns ids."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     released: list[str] = []
     with ledger_lock(rt):
         while True:
@@ -211,7 +211,7 @@ def release_held(runtime: Runtime | Path | str) -> list[str]:
 
 # --- supersede --------------------------------------------------------------------------
 
-def _cancel_task(rt: Runtime, task: dict[str, Any], new_state: str, msg_status: str) -> bool:
+def _cancel_task(rt: ProjectState, task: dict[str, Any], new_state: str, msg_status: str) -> bool:
     """Open task -> new_state; its undelivered message -> msg_status. False if not open."""
     if task.get("state") not in OPEN:
         return False
@@ -225,9 +225,9 @@ def _cancel_task(rt: Runtime, task: dict[str, Any], new_state: str, msg_status: 
     return True
 
 
-def supersede_task(runtime: Runtime | Path | str, task_id: str) -> list[str]:
+def supersede_task(state: StateLike, task_id: str) -> list[str]:
     """Supersede task_id and, recursively, its children (by `parent`). Returns superseded ids."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     done: list[str] = []
     with ledger_lock(rt):
         tasks = {t["id"]: t for t in all_tasks(rt)}
@@ -249,7 +249,7 @@ def supersede_task(runtime: Runtime | Path | str, task_id: str) -> list[str]:
     return done
 
 
-def _notify_superseded(rt: Runtime, task: dict[str, Any]) -> str | None:
+def _notify_superseded(rt: ProjectState, task: dict[str, Any]) -> str | None:
     """A cascaded child whose message already reached (or is reaching) its assignee: tell the
     assignee to stop. The root task's assignee learns it from the SUPERSEDES pointer instead."""
     if task.get("to") not in AGENTS:
@@ -268,7 +268,7 @@ def _notify_superseded(rt: Runtime, task: dict[str, Any]) -> str | None:
 
 # --- system messages --------------------------------------------------------------------
 
-def _system(rt: Runtime, to: str, result: str, subject: str, body: str,
+def _system(rt: ProjectState, to: str, result: str, subject: str, body: str,
             re: str | None = None) -> Message:
     msg = store.create(rt, from_=SYSTEM_SENDER, to=to, type="system", subject=subject, body=body,
                        re=re, result=result, status="delivered" if to == HUMAN else "queued")
@@ -278,7 +278,7 @@ def _system(rt: Runtime, to: str, result: str, subject: str, body: str,
 
 # --- send -------------------------------------------------------------------------------
 
-def _validate(rt: Runtime, *, from_: str, to: str, type: str, re: str | None,
+def _validate(rt: ProjectState, *, from_: str, to: str, type: str, re: str | None,
               parent: str | None, supersede_id: str | None, result: str | None
               ) -> dict[str, Any] | None:
     """Raise LedgerError on bad input; return the replied-to task (reply types) or None."""
@@ -338,12 +338,12 @@ def _validate(rt: Runtime, *, from_: str, to: str, type: str, re: str | None,
     return None
 
 
-def send(runtime: Runtime | Path | str, cfg: Any = None, *, from_: str, to: str, type: str,
+def send(state: StateLike, cfg: Any = None, *, from_: str, to: str, type: str,
          subject: str, body: str, re: str | None = None, parent: str | None = None,
          supersede: str | None = None, result: str | None = None,
          attachments: list[str] | None = None) -> Message:
     """The single entry point behind `ads send`. Raises LedgerError on invalid input."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     supersede_id = supersede
     with ledger_lock(rt):
         replied = _validate(rt, from_=from_, to=to, type=type, re=re, parent=parent,
@@ -381,10 +381,10 @@ def send(runtime: Runtime | Path | str, cfg: Any = None, *, from_: str, to: str,
 
 # --- delivery ---------------------------------------------------------------------------
 
-def mark_delivered(runtime: Runtime | Path | str, msg_id: str) -> Message | None:
+def mark_delivered(state: StateLike, msg_id: str) -> Message | None:
     """Message -> delivered (from delivering, or queued via delivering) and its task
     queued -> delivered. Idempotent. Returns the message (None if unknown)."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     with ledger_lock(rt):
         try:
             m = store.get(rt, msg_id)
@@ -402,10 +402,10 @@ def mark_delivered(runtime: Runtime | Path | str, msg_id: str) -> Message | None
 
 # --- cascades ---------------------------------------------------------------------------
 
-def agent_down_cascade(runtime: Runtime | Path | str, agent: str) -> list[str]:
+def agent_down_cascade(state: StateLike, agent: str) -> list[str]:
     """On down(pane_dead): fail the agent's open incoming tasks, notify each sender with
     system(agent-down), then release held messages. Returns the system message ids."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     out: list[str] = []
     with ledger_lock(rt):
         for t in open_incoming(rt, agent):
@@ -419,7 +419,7 @@ def agent_down_cascade(runtime: Runtime | Path | str, agent: str) -> list[str]:
     return out
 
 
-def _reply_command(rt: Runtime, agent: str, t: dict[str, Any]) -> str:
+def _reply_command(rt: ProjectState, agent: str, t: dict[str, Any]) -> str:
     rtype = REPLY_FOR[t["type"]]
     from ads.launcher import ads_bin  # lazy: only needed when a Stop is blocked
     parts = [f"{ads_bin(rt)} send --to {t['from']} --type {rtype} --re {t['id']}"]
@@ -431,9 +431,9 @@ def _reply_command(rt: Runtime, agent: str, t: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def stop_decision(runtime: Runtime | Path | str, cfg: Any, agent: str) -> str | None:
+def stop_decision(state: StateLike, cfg: Any, agent: str) -> str | None:
     """Block reason for the Stop hook, or None to allow the stop (plan §4.6)."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     max_nudges = cfg.protocol.max_report_nudges
     with ledger_lock(rt):
         tasks = [t for t in open_incoming(rt, agent) if t["state"] == "delivered"]
@@ -456,16 +456,16 @@ def stop_decision(runtime: Runtime | Path | str, cfg: Any, agent: str) -> str | 
     return "\n".join(lines)
 
 
-def exhausted_tasks(runtime: Runtime | Path | str, cfg: Any) -> list[dict[str, Any]]:
+def exhausted_tasks(state: StateLike, cfg: Any) -> list[dict[str, Any]]:
     """Open delivered tasks whose nudges reached max_report_nudges."""
     max_nudges = cfg.protocol.max_report_nudges
-    return [t for t in open_tasks(runtime)
+    return [t for t in open_tasks(state)
             if t["state"] == "delivered" and t.get("nudges", 0) >= max_nudges]
 
 
-def fail_missing_report(runtime: Runtime | Path | str, task: dict[str, Any]) -> str | None:
+def fail_missing_report(state: StateLike, task: dict[str, Any]) -> str | None:
     """Mark task failed and send system(missing-report) to its sender. Returns the msg id."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     with ledger_lock(rt):
         current = get_task(rt, task["id"])
         if current is None or not _cancel_task(rt, current, "failed", "failed"):
@@ -479,9 +479,9 @@ def fail_missing_report(runtime: Runtime | Path | str, task: dict[str, Any]) -> 
     return m.id
 
 
-def api_error_notify(runtime: Runtime | Path | str, agent: str, error: Any) -> list[str]:
+def api_error_notify(state: StateLike, agent: str, error: Any) -> list[str]:
     """system(api-error) to the sender of each open incoming task of `agent`."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     out: list[str] = []
     text = error if isinstance(error, str) else json.dumps(error, default=str)
     with ledger_lock(rt):
@@ -493,9 +493,9 @@ def api_error_notify(runtime: Runtime | Path | str, agent: str, error: Any) -> l
     return out
 
 
-def current_phase(runtime: Runtime | Path | str) -> str | None:
+def current_phase(state: StateLike) -> str | None:
     """plan|dev|test from the orchestrator's oldest open, non-held outgoing instruct."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     held_ids = {m.id for m in store.held_all(rt)}
     for t in open_outgoing(rt, "orchestrator"):
         if t["type"] == "instruct" and t["id"] not in held_ids:

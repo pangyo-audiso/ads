@@ -17,7 +17,7 @@ from ads.bus import state as S
 from ads.bus import store
 from ads.bus.envelope import pointer_line
 from ads.config import default_config
-from ads.paths import Runtime
+from ads.paths import ProjectState
 
 REPO = Path(__file__).resolve().parents[2]
 ADS = REPO / ".venv" / "bin" / "ads"
@@ -63,39 +63,38 @@ def session_end(reason: str) -> dict:
 
 
 @pytest.fixture
-def rt(tmp_runtime: Path) -> Runtime:
-    r = Runtime(tmp_runtime)
-    r.ensure()
-    return r
+def rt(tmp_state: ProjectState) -> ProjectState:
+    return tmp_state
 
 
-def run_hook(rt: Runtime, event: str, payload: dict | str, agent: str = "planner"
+def run_hook(rt: ProjectState, event: str, payload: dict | str, agent: str = "planner"
              ) -> tuple[int, str]:
     """In-process: (exit code, stdout)."""
     raw = payload if isinstance(payload, str) else json.dumps(payload)
     out = io.StringIO()
     code = hooks.main(event, stdin=io.StringIO(raw), stdout=out,
-                      env={"ADS_RUNTIME": str(rt.root), "ADS_AGENT": agent})
+                      env={"ADS_STATE_DIR": str(rt.dir), "ADS_AGENT": agent})
     return code, out.getvalue()
 
 
-def run_sub(rt: Runtime | None, event: str, raw: str, agent: str | None = "planner"
+def run_sub(rt: ProjectState | None, event: str, raw: str, agent: str | None = "planner"
             ) -> subprocess.CompletedProcess:
-    env = {k: v for k, v in os.environ.items() if k not in ("ADS_RUNTIME", "ADS_AGENT")}
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ADS_RUNTIME", "ADS_STATE_DIR", "ADS_PROJECT", "ADS_AGENT")}
     if rt is not None:
-        env["ADS_RUNTIME"] = str(rt.root)
+        env["ADS_STATE_DIR"] = str(rt.dir)
     if agent is not None:
         env["ADS_AGENT"] = agent
     return subprocess.run([str(ADS), "hook", event], input=raw, capture_output=True, text=True,
                           env=env, timeout=30)
 
 
-def log_lines(rt: Runtime) -> list[dict]:
+def log_lines(rt: ProjectState) -> list[dict]:
     p = rt.logs / "hooks.log"
     return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
 
-def errors(rt: Runtime) -> list[str]:
+def errors(rt: ProjectState) -> list[str]:
     return [r["error"] for r in log_lines(rt) if "error" in r]
 
 
@@ -104,7 +103,7 @@ def ctx(stdout: str) -> str:
     return data["hookSpecificOutput"]["additionalContext"]
 
 
-def delivered_task(rt: Runtime, to: str = "planner") -> str:
+def delivered_task(rt: ProjectState, to: str = "planner") -> str:
     """orchestrator -> `to` instruct, pasted and confirmed; returns its id."""
     m = L.send(rt, default_config(), from_="orchestrator", to=to, type="instruct",
                subject="Plan it", body="please plan")
@@ -115,16 +114,16 @@ def delivered_task(rt: Runtime, to: str = "planner") -> str:
 
 # --- base rules -------------------------------------------------------------------------
 
-@pytest.mark.parametrize("missing", ["ADS_RUNTIME", "ADS_AGENT", "both"])
-def test_unset_env_exits_0_silently(rt: Runtime, missing: str) -> None:
-    cp = run_sub(None if missing in ("ADS_RUNTIME", "both") else rt, "session-start",
+@pytest.mark.parametrize("missing", ["ADS_STATE_DIR", "ADS_AGENT", "both"])
+def test_unset_env_exits_0_silently(rt: ProjectState, missing: str) -> None:
+    cp = run_sub(None if missing in ("ADS_STATE_DIR", "both") else rt, "session-start",
                  json.dumps(session_start()),
                  agent=None if missing in ("ADS_AGENT", "both") else "planner")
     assert cp.returncode == 0 and cp.stdout == "" and cp.stderr == ""
     assert not (rt.logs / "hooks.log").exists()
 
 
-def test_broken_stdin_exit_0_traceback_logged(rt: Runtime) -> None:
+def test_broken_stdin_exit_0_traceback_logged(rt: ProjectState) -> None:
     cp = run_sub(rt, "stop", "{not json")
     assert cp.returncode == 0 and cp.stdout == ""
     recs = log_lines(rt)
@@ -132,13 +131,13 @@ def test_broken_stdin_exit_0_traceback_logged(rt: Runtime) -> None:
     assert any("Traceback" in e and "not JSON" in e for e in errors(rt))
 
 
-def test_non_object_payload_and_unknown_event(rt: Runtime) -> None:
+def test_non_object_payload_and_unknown_event(rt: ProjectState) -> None:
     assert run_hook(rt, "stop", "[1, 2]") == (0, "")
     assert run_hook(rt, "no-such-event", {}) == (0, "")
     assert len(errors(rt)) == 2
 
 
-def test_handler_exception_logged_no_output(rt: Runtime, monkeypatch) -> None:
+def test_handler_exception_logged_no_output(rt: ProjectState, monkeypatch) -> None:
     def boom(*a, **k):
         raise RuntimeError("kaboom")
     monkeypatch.setattr(S, "transition", boom)
@@ -146,13 +145,13 @@ def test_handler_exception_logged_no_output(rt: Runtime, monkeypatch) -> None:
     assert any("kaboom" in e for e in errors(rt))
 
 
-def test_raw_event_logged_in_smoke_format(rt: Runtime) -> None:
+def test_raw_event_logged_in_smoke_format(rt: ProjectState) -> None:
     run_hook(rt, "session-end", session_end("other"))
     text = (rt.logs / "hooks.log").read_text()
     assert '"event": "session-end"' in text and f'"session_id": "{SID}"' in text
 
 
-def test_empty_stdin_ok(rt: Runtime) -> None:
+def test_empty_stdin_ok(rt: ProjectState) -> None:
     cp = run_sub(rt, "session-end", "")
     assert cp.returncode == 0 and errors(rt) == []
     assert S.read_state(rt, "planner")["state"] == "down"
@@ -160,7 +159,7 @@ def test_empty_stdin_ok(rt: Runtime) -> None:
 
 # --- session-start ----------------------------------------------------------------------
 
-def test_session_start_context_counts_pending(rt: Runtime) -> None:
+def test_session_start_context_counts_pending(rt: ProjectState) -> None:
     cfg = default_config()
     L.send(rt, cfg, from_="orchestrator", to="planner", type="instruct", subject="a", body="b")
     L.send(rt, cfg, from_="orchestrator", to="planner", type="info", subject="c", body="d")
@@ -175,13 +174,13 @@ def test_session_start_context_counts_pending(rt: Runtime) -> None:
     assert st["state"] == "idle" and st["session_id"] == SID and st["seen_session_start"]
 
 
-def test_session_start_resume_idle(rt: Runtime) -> None:
+def test_session_start_resume_idle(rt: ProjectState) -> None:
     code, out = run_hook(rt, "session-start", session_start("resume"))
     assert code == 0 and "0 message(s) pending" in ctx(out)
     assert S.read_state(rt, "planner")["state"] == "idle"
 
 
-def test_session_start_compact_is_state_noop(rt: Runtime) -> None:
+def test_session_start_compact_is_state_noop(rt: ProjectState) -> None:
     run_hook(rt, "session-start", session_start())
     run_hook(rt, "prompt-submit", prompt_submit("hello"))
     before = S.read_state(rt, "planner")
@@ -195,7 +194,7 @@ def test_session_start_compact_is_state_noop(rt: Runtime) -> None:
 
 # --- prompt-submit ----------------------------------------------------------------------
 
-def test_prompt_submit_pointer_marks_delivered(rt: Runtime) -> None:
+def test_prompt_submit_pointer_marks_delivered(rt: ProjectState) -> None:
     run_hook(rt, "session-start", session_start())
     m = L.send(rt, default_config(), from_="orchestrator", to="planner", type="instruct",
                subject="Plan the thing", body="details")
@@ -213,7 +212,7 @@ def test_prompt_submit_pointer_marks_delivered(rt: Runtime) -> None:
     assert "subject: Plan the thing" in c and str(store.body_path(rt, m.id)) in c
 
 
-def test_prompt_submit_pointer_supersedes_and_re(rt: Runtime) -> None:
+def test_prompt_submit_pointer_supersedes_and_re(rt: ProjectState) -> None:
     cfg = default_config()
     t1 = L.send(rt, cfg, from_="orchestrator", to="planner", type="instruct", subject="a", body="b")
     t2 = L.send(rt, cfg, from_="orchestrator", to="planner", type="instruct", subject="new",
@@ -223,14 +222,14 @@ def test_prompt_submit_pointer_supersedes_and_re(rt: Runtime) -> None:
     assert store.get(rt, t2.id).status == "delivered"
 
 
-def test_prompt_submit_unknown_pointer(rt: Runtime) -> None:
+def test_prompt_submit_unknown_pointer(rt: ProjectState) -> None:
     code, out = run_hook(rt, "prompt-submit", prompt_submit(
         "[ADS-MSG id=m-20261005-999999 from=orchestrator type=instruct] Read x"))
     assert code == 0 and "unknown message" in ctx(out)
     assert S.read_state(rt, "planner")["state"] == "busy" and errors(rt) == []
 
 
-def test_prompt_submit_manual(rt: Runtime) -> None:
+def test_prompt_submit_manual(rt: ProjectState) -> None:
     run_hook(rt, "session-start", session_start())
     code, out = run_hook(rt, "prompt-submit", prompt_submit("please look at foo.py"))
     assert (code, out) == (0, "")
@@ -240,7 +239,7 @@ def test_prompt_submit_manual(rt: Runtime) -> None:
 
 # --- stop -------------------------------------------------------------------------------
 
-def test_stop_blocks_when_task_open_and_no_progress(rt: Runtime) -> None:
+def test_stop_blocks_when_task_open_and_no_progress(rt: ProjectState) -> None:
     tid = delivered_task(rt)
     run_hook(rt, "prompt-submit", prompt_submit("[ADS-MSG id=%s from=orchestrator type=instruct] x"
                                                  % tid))
@@ -257,7 +256,7 @@ def test_stop_blocks_when_task_open_and_no_progress(rt: Runtime) -> None:
     assert rt.poke.stat().st_mtime_ns > poke_before
 
 
-def test_stop_hook_active_still_capped_by_nudges(rt: Runtime) -> None:
+def test_stop_hook_active_still_capped_by_nudges(rt: ProjectState) -> None:
     tid = delivered_task(rt)
     run_hook(rt, "prompt-submit", prompt_submit("work"))
     for _ in range(default_config().protocol.max_report_nudges):
@@ -269,7 +268,7 @@ def test_stop_hook_active_still_capped_by_nudges(rt: Runtime) -> None:
     assert L.get_task(rt, tid)["nudges"] == 2
 
 
-def test_stop_allows_after_reply(rt: Runtime) -> None:
+def test_stop_allows_after_reply(rt: ProjectState) -> None:
     tid = delivered_task(rt)
     run_hook(rt, "prompt-submit", prompt_submit("work"))
     L.send(rt, default_config(), from_="planner", to="orchestrator", type="report", re=tid,
@@ -278,7 +277,7 @@ def test_stop_allows_after_reply(rt: Runtime) -> None:
     assert S.read_state(rt, "planner")["state"] == "idle"
 
 
-def test_stop_allows_without_tasks(rt: Runtime) -> None:
+def test_stop_allows_without_tasks(rt: ProjectState) -> None:
     run_hook(rt, "session-start", session_start())
     run_hook(rt, "prompt-submit", prompt_submit("hi"))
     cp = run_sub(rt, "stop", json.dumps(stop()))
@@ -287,7 +286,7 @@ def test_stop_allows_without_tasks(rt: Runtime) -> None:
     assert rt.poke.exists()
 
 
-def test_stop_allows_when_waiting_on_outgoing(rt: Runtime) -> None:
+def test_stop_allows_when_waiting_on_outgoing(rt: ProjectState) -> None:
     delivered_task(rt)
     run_hook(rt, "prompt-submit", prompt_submit("work"))
     S.transition(rt, "planner", "prompt-submit", {})  # reset progress after the send below
@@ -300,7 +299,7 @@ def test_stop_allows_when_waiting_on_outgoing(rt: Runtime) -> None:
 # --- stop-failure -----------------------------------------------------------------------
 
 @pytest.mark.parametrize("legacy", [False, True])
-def test_stop_failure_unrecoverable_writes_alert(rt: Runtime, legacy: bool) -> None:
+def test_stop_failure_unrecoverable_writes_alert(rt: ProjectState, legacy: bool) -> None:
     code, out = run_hook(rt, "stop-failure",
                          stop_failure("billing_error", "credit exhausted", legacy=legacy))
     assert (code, out) == (0, "")
@@ -314,7 +313,7 @@ def test_stop_failure_unrecoverable_writes_alert(rt: Runtime, legacy: bool) -> N
     assert rt.poke.exists()
 
 
-def test_stop_failure_recoverable_no_alert(rt: Runtime) -> None:
+def test_stop_failure_recoverable_no_alert(rt: ProjectState) -> None:
     run_hook(rt, "stop-failure", stop_failure("rate_limit", "slow down"))
     assert S.read_state(rt, "planner")["last_error"]["alert"] is False
     assert list(rt.alerts.glob("*.json")) == []
@@ -326,14 +325,14 @@ def test_stop_failure_recoverable_no_alert(rt: Runtime) -> None:
     ("clear", "restarting"), ("resume", "restarting"), ("logout", "down"),
     ("prompt_input_exit", "down"), ("other", "down"),
 ])
-def test_session_end(rt: Runtime, reason: str, state: str) -> None:
+def test_session_end(rt: ProjectState, reason: str, state: str) -> None:
     run_hook(rt, "session-start", session_start())
     assert run_hook(rt, "session-end", session_end(reason)) == (0, "")
     st = S.read_state(rt, "planner")
     assert (st["state"], st["reason"]) == (state, reason)
 
 
-def test_session_end_subprocess_fast(rt: Runtime) -> None:
+def test_session_end_subprocess_fast(rt: ProjectState) -> None:
     raw = json.dumps(session_end("other"))
     run_sub(rt, "session-end", raw)  # warm caches
     t0 = time.monotonic()

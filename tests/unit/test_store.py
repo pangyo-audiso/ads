@@ -11,22 +11,22 @@ import pytest
 
 from ads.bus import store
 from ads.bus.log import log_event, read_events
-from ads.paths import Runtime
+from ads.paths import ProjectState
 
 
 @pytest.fixture
-def rt(tmp_runtime: Path) -> Runtime:
-    return Runtime(tmp_runtime)
+def rt(tmp_state: ProjectState) -> ProjectState:
+    return tmp_state
 
 
-def _mk(rt: Runtime, to: str = "planner", **kw):
+def _mk(rt: ProjectState, to: str = "planner", **kw):
     kw.setdefault("from_", "orchestrator")
     kw.setdefault("type", "instruct")
     kw.setdefault("body", "body")
     return store.create(rt, to=to, **kw)
 
 
-def test_seq_monotonic_under_threads(rt: Runtime) -> None:
+def test_seq_monotonic_under_threads(rt: ProjectState) -> None:
     results: list[int] = []
     lock = threading.Lock()
 
@@ -45,14 +45,14 @@ def test_seq_monotonic_under_threads(rt: Runtime) -> None:
     assert int(rt.seq.read_text()) == 400
 
 
-def test_seq_reseeds_from_messages_if_counter_lost(rt: Runtime) -> None:
+def test_seq_reseeds_from_messages_if_counter_lost(rt: ProjectState) -> None:
     for _ in range(3):
         _mk(rt)
     rt.seq.unlink()
     assert store.next_seq(rt) == 4
 
 
-def test_create_writes_both_files(rt: Runtime) -> None:
+def test_create_writes_both_files(rt: ProjectState) -> None:
     m = _mk(rt, subject="Plan it", body="hello\nworld")
     assert m.id.startswith("m-") and m.seq == 1
     assert (rt.msgs / f"{m.id}.md").read_text() == "hello\nworld\n"
@@ -66,7 +66,7 @@ def test_create_writes_both_files(rt: Runtime) -> None:
     assert [e["event"] for e in read_events(rt)] == ["created", "created"]
 
 
-def test_create_rejects_bad_input(rt: Runtime) -> None:
+def test_create_rejects_bad_input(rt: ProjectState) -> None:
     with pytest.raises(ValueError):
         _mk(rt, type="bogus")
     with pytest.raises(ValueError):
@@ -75,14 +75,14 @@ def test_create_rejects_bad_input(rt: Runtime) -> None:
         _mk(rt, status="delivering")
 
 
-def test_get_missing(rt: Runtime) -> None:
+def test_get_missing(rt: ProjectState) -> None:
     with pytest.raises(store.MessageNotFound):
         store.get(rt, "m-20261005-000099")
     with pytest.raises(store.MessageNotFound):
         store.update(rt, "m-20261005-000099", enters=1)
 
 
-def test_queued_for_orders_by_seq_not_id(rt: Runtime) -> None:
+def test_queued_for_orders_by_seq_not_id(rt: ProjectState) -> None:
     # seq 1 created "tomorrow", seq 2 "today": ids sort the other way round.
     today = datetime(2026, 10, 5, 12, 0).astimezone()
     a = _mk(rt, now=today + timedelta(days=1))
@@ -119,7 +119,7 @@ PATH = {
 }
 
 
-def _at(rt: Runtime, status: str):
+def _at(rt: ProjectState, status: str):
     m = _mk(rt)
     for s in PATH[status]:
         m = store.update(rt, m.id, status=s)
@@ -128,14 +128,14 @@ def _at(rt: Runtime, status: str):
 
 
 @pytest.mark.parametrize(("old", "new"), LEGAL)
-def test_legal_transitions(rt: Runtime, old: str, new: str) -> None:
+def test_legal_transitions(rt: ProjectState, old: str, new: str) -> None:
     m = _at(rt, old)
     m2 = store.update(rt, m.id, status=new)
     assert m2.status == new == store.get(rt, m.id).status
 
 
 @pytest.mark.parametrize(("old", "new"), ILLEGAL)
-def test_illegal_transitions(rt: Runtime, old: str, new: str) -> None:
+def test_illegal_transitions(rt: ProjectState, old: str, new: str) -> None:
     m = _at(rt, old)
     before = (rt.msgs / f"{m.id}.json").read_text()
     with pytest.raises(store.TransitionError):
@@ -149,7 +149,7 @@ def test_transition_table_consistent() -> None:
     assert store.TERMINAL == {"delivered", "superseded", "ignored"}
 
 
-def test_same_status_and_field_updates(rt: Runtime) -> None:
+def test_same_status_and_field_updates(rt: ProjectState) -> None:
     m = _mk(rt)
     store.update(rt, m.id, status="queued", pastes=2)
     assert store.get(rt, m.id).pastes == 2
@@ -161,7 +161,7 @@ def test_same_status_and_field_updates(rt: Runtime) -> None:
         store.update(rt, m.id, type="report", result="bogus")
 
 
-def test_delivered_stamps_time_and_unconfirmed(rt: Runtime) -> None:
+def test_delivered_stamps_time_and_unconfirmed(rt: ProjectState) -> None:
     m = _mk(rt)
     store.update(rt, m.id, status="delivering")
     m2 = store.update(rt, m.id, status="delivered", unconfirmed=True)
@@ -170,7 +170,7 @@ def test_delivered_stamps_time_and_unconfirmed(rt: Runtime) -> None:
     assert h.delivered_at is not None
 
 
-def test_bus_jsonl_one_line_per_transition(rt: Runtime) -> None:
+def test_bus_jsonl_one_line_per_transition(rt: ProjectState) -> None:
     m = _mk(rt)
     store.update(rt, m.id, pastes=1)                 # no transition: no line
     store.update(rt, m.id, status="delivering")
@@ -188,7 +188,7 @@ def test_bus_jsonl_one_line_per_transition(rt: Runtime) -> None:
     assert set(last) == {"ts", "event", "id", "from", "to", "type", "status", "extra"}
 
 
-def test_log_event_concurrent_lines_intact(rt: Runtime) -> None:
+def test_log_event_concurrent_lines_intact(rt: ProjectState) -> None:
     big = "z" * 5000
 
     def worker(i: int) -> None:
@@ -206,7 +206,7 @@ def test_log_event_concurrent_lines_intact(rt: Runtime) -> None:
     assert len(read_events(rt)) == 400
 
 
-def test_update_atomic_under_concurrency(rt: Runtime) -> None:
+def test_update_atomic_under_concurrency(rt: ProjectState) -> None:
     m = _mk(rt)
     path = rt.msgs / f"{m.id}.json"
     stop = threading.Event()

@@ -77,12 +77,14 @@ FAST_DELIVERY = {"tick_ms": 100, "paste_settle_ms": 150, "confirm_timeout_s": 2,
 
 
 class Cell:
-    """A runtime + private tmux layout + in-process Supervisor driven by run_once()."""
+    """A runtime + registered project state + private tmux layout + in-process Supervisor
+    driven by run_once()."""
 
     def __init__(self, tmux: Tmux, runtime: Path, project: Path) -> None:
-        from ads.paths import Runtime
+        from ads.projects import register
         self.tmux = tmux
-        self.rt = Runtime(runtime)
+        project.mkdir(parents=True, exist_ok=True)
+        self.rt = register(runtime, project)  # <runtime>/projects/<name>
         self.project = project
         self.log = runtime / "fake.jsonl"
         self.sup = None
@@ -106,13 +108,13 @@ class Cell:
         for agent, k in (fake or {}).items():
             knobs.setdefault(agent, {}).update(k)
         (runtime / "fake.json").write_text(json.dumps(knobs))
-        cell.panes = build_layout(tmux, "ads-cell", project, runtime)
-        write_session(runtime, socket=tmux.socket, session="ads-cell", project=project)
+        cell.panes = build_layout(tmux, "ads-cell", project, cell.rt)
+        write_session(cell.rt, socket=tmux.socket, session="ads-cell", project=project)
         return cell
 
     def fake(self, agent: str, **knobs) -> None:
         """Change fake knobs (take effect at the agent's next (re)spawn)."""
-        path = self.rt.root / "fake.json"
+        path = self.rt.runtime / "fake.json"
         data = json.loads(path.read_text())
         data.setdefault(agent, {}).update({k: str(v) for k, v in knobs.items()})
         path.write_text(json.dumps(data))
@@ -149,7 +151,7 @@ class Cell:
         from ads.config import load_config
         kw.setdefault("subject", "test")
         kw.setdefault("body", "body\n")
-        return ledger.send(self.rt, load_config(runtime=self.rt.root), **kw)
+        return ledger.send(self.rt, load_config(runtime=self.rt.runtime), **kw)
 
     def events(self, agent: str | None = None, event: str | None = None) -> list[dict]:
         return [e for e in fake_log(self.log)

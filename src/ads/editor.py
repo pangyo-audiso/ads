@@ -1,6 +1,8 @@
 """Pane-3 human editor (plan §9): a prompt_toolkit prompt that talks to the orchestrator.
 
-Run as `ads input` in tmux window 0 pane 3 (`main(runtime, cfg)`).
+Run as `ads input -p <name>` in tmux window 0 pane 3 (`main(state, cfg)`). It works on its
+own project only: the supervisor starts it with `$ADS_STATE_DIR` and `-p`, so `/ads`
+commands below never need a project argument.
 
 Keys
 ----
@@ -17,7 +19,8 @@ Keys
   `S-Enter if-shell -F '#{==:#{@ads_role},human}' 'send-keys C-j' 'send-keys S-Enter'`
   (with `extended-keys on`), so nothing extra is needed here. `ads doctor --key-probe`
   (→ `key_probe()`) or `/ads keys` shows what the terminal actually sends.
-- **History**: FileHistory at `cfg.editor.history_file` (relative to the runtime).
+- **History**: FileHistory at `cfg.editor.history_file` (relative to the project's state dir
+  `<runtime>/projects/<name>/`, so each project keeps its own history).
   Up/Down (and vi `k`/`j` in navigation mode) move inside a multi-line buffer and walk
   history at its first/last line (prompt_toolkit auto_up/auto_down); with history search
   enabled, Up only recalls entries starting with the text before the cursor.
@@ -29,7 +32,7 @@ Local commands (whole input starting with `/ads`): status, inbox, keys, restart
 <agent>|supervisor [--resume], instruct <text>, help.
 
 New messages to the human (reports, questions, system notices) are printed above the prompt.
-Logs go to `work/logs/editor.log`.
+Logs go to `<state>/work/logs/editor.log`.
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ from typing import Any
 from ads.bus import ledger, store
 from ads.bus import state as agent_state
 from ads.bus.envelope import Message
-from ads.paths import AGENTS, HUMAN, Runtime
+from ads.paths import AGENTS, HUMAN, ProjectState, StateLike, as_state
 
 log = logging.getLogger("ads.editor")
 
@@ -74,7 +77,7 @@ ads editor — Enter: send to orchestrator (answers its open question if any)
   C-j / Alt+Enter / Shift+Enter : newline        C-r : reverse history search
   Up/Down (vi k/j)              : history        C-c : clear, twice within 1 s: exit
   !<text>                       : force an instruct while a question is open
-/ads status                     : agent states, queues, tasks, phase
+/ads status                     : this project's agent states, queues, tasks, phase
 /ads inbox                      : messages to you (open questions marked)
 /ads keys                       : show raw bytes of the keys you press (5 s)
 /ads restart <agent>|supervisor [--resume] : ask the supervisor to restart
@@ -82,12 +85,12 @@ ads editor — Enter: send to orchestrator (answers its open question if any)
 /ads help                       : this help"""
 
 
-def _rt(runtime: Runtime | Path | str) -> Runtime:
-    return runtime if isinstance(runtime, Runtime) else Runtime(Path(runtime))
+def _rt(state: StateLike) -> ProjectState:
+    return as_state(state)
 
 
-def setup_logging(runtime: Runtime | Path | str) -> None:
-    rt = _rt(runtime)
+def setup_logging(state: StateLike) -> None:
+    rt = _rt(state)
     path = rt.logs / "editor.log"
     for h in log.handlers:
         if isinstance(h, logging.FileHandler) and Path(h.baseFilename) == path:
@@ -101,22 +104,22 @@ def setup_logging(runtime: Runtime | Path | str) -> None:
 
 # --- queries --------------------------------------------------------------------------
 
-def open_question(runtime: Runtime | Path | str) -> dict[str, Any] | None:
+def open_question(state: StateLike) -> dict[str, Any] | None:
     """Oldest open question task from the orchestrator to the human, or None."""
-    for t in ledger.open_tasks(runtime):
+    for t in ledger.open_tasks(state):
         if t.get("type") == "question" and t.get("from") == ORCH and t.get("to") == HUMAN:
             return t
     return None
 
 
-def human_messages(runtime: Runtime | Path | str) -> list[Message]:
+def human_messages(state: StateLike) -> list[Message]:
     """Messages addressed to the human, by seq (oldest first)."""
-    return [m for m in store.all_messages(runtime) if m.to == HUMAN]
+    return [m for m in store.all_messages(state) if m.to == HUMAN]
 
 
-def supervisor_alive(runtime: Runtime | Path | str) -> bool:
+def supervisor_alive(state: StateLike) -> bool:
     try:
-        m = re.search(r"\d+", _rt(runtime).supervisor_pid.read_text())
+        m = re.search(r"\d+", _rt(state).supervisor_pid.read_text())
         if not m:
             return False
         os.kill(int(m.group()), 0)
@@ -144,9 +147,9 @@ def subject_of(text: str) -> str:
 
 # --- toolbar --------------------------------------------------------------------------
 
-def toolbar_lines(runtime: Runtime | Path | str) -> list[str]:
+def toolbar_lines(state: StateLike) -> list[str]:
     """Two compact status lines for the bottom toolbar."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     states = agent_state.all_states(rt)
     parts = []
     for a in AGENTS:
@@ -172,10 +175,11 @@ def toolbar_lines(runtime: Runtime | Path | str) -> list[str]:
 
 # --- status / inbox renderers ---------------------------------------------------------
 
-def render_status(runtime: Runtime | Path | str, cfg: Any = None) -> str:
-    rt = _rt(runtime)
+def render_status(state: StateLike, cfg: Any = None) -> str:
+    from ads.projects import project_path
+    rt = _rt(state)
     states = agent_state.all_states(rt)
-    out = ["agents:"]
+    out = [f"project: {rt.name} ({project_path(rt) or '?'})", "agents:"]
     for a in AGENTS:
         st = states.get(a, {})
         model = ""
@@ -207,8 +211,8 @@ def render_status(runtime: Runtime | Path | str, cfg: Any = None) -> str:
     return "\n".join(out)
 
 
-def render_inbox(runtime: Runtime | Path | str, limit: int = 20) -> str:
-    rt = _rt(runtime)
+def render_inbox(state: StateLike, limit: int = 20) -> str:
+    rt = _rt(state)
     msgs = human_messages(rt)
     if not msgs:
         return "inbox: no messages to human yet"
@@ -224,9 +228,9 @@ def render_inbox(runtime: Runtime | Path | str, limit: int = 20) -> str:
     return "\n".join(out)
 
 
-def render_incoming(runtime: Runtime | Path | str, m: Message) -> str:
+def render_incoming(state: StateLike, m: Message) -> str:
     """Block printed above the prompt when a new message to the human arrives."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     kind = m.type + (f"/{m.result}" if m.result else "")
     head = f"── {m.id} {kind} from {m.from_}" + (f" re={m.re}" if m.re else "") + " ──"
     try:
@@ -256,10 +260,10 @@ def is_command(text: str) -> bool:
     return bool(words) and words[0] == "/ads"
 
 
-def write_restart_request(runtime: Runtime | Path | str, target: str,
+def write_restart_request(state: StateLike, target: str,
                           resume: bool = False) -> Path:
-    """Drop `work/run/requests/<ts>-restart.json` for the supervisor and touch the poke file."""
-    rt = _rt(runtime)
+    """Drop `<state>/work/run/requests/<ts>-restart.json` for the supervisor and touch the poke file."""
+    rt = _rt(state)
     rt.requests.mkdir(parents=True, exist_ok=True)
     path = rt.requests / f"{time.time_ns()}-restart.json"
     tmp = path.with_name("." + path.name + ".tmp")
@@ -272,22 +276,22 @@ def write_restart_request(runtime: Runtime | Path | str, target: str,
     return path
 
 
-def run_command(runtime: Runtime | Path | str, cfg: Any, text: str) -> str:
+def run_command(state: StateLike, cfg: Any, text: str) -> str:
     """Execute a `/ads ...` command; return the text to print."""
     m = re.match(r"\s*(\S*)\s?(.*)", text.strip()[len("/ads"):], re.S)
     cmd, arg = (m.group(1), m.group(2)) if m else ("", "")
     if not cmd or cmd == "help":
         return HELP
     if cmd == "status":
-        return render_status(runtime, cfg)
+        return render_status(state, cfg)
     if cmd == "inbox":
-        return render_inbox(runtime)
+        return render_inbox(state)
     if cmd == "keys":
         return "key probe needs the terminal: run it inside the editor, or `ads doctor --key-probe`"
     if cmd == "instruct":
         if not arg.strip():
             return "usage: /ads instruct <text>"
-        return send_input(runtime, cfg, arg, force_instruct=True)
+        return send_input(state, cfg, arg, force_instruct=True)
     if cmd == "restart":
         words = arg.split()
         resume = "--resume" in words
@@ -295,32 +299,32 @@ def run_command(runtime: Runtime | Path | str, cfg: Any, text: str) -> str:
         if len(words) != 1 or words[0] not in (*AGENTS, "supervisor"):
             return "usage: /ads restart <" + "|".join(AGENTS) + "|supervisor> [--resume]"
         target = words[0]
-        path = write_restart_request(runtime, target, resume)
+        path = write_restart_request(state, target, resume)
         msg = f"restart requested: {target}{' --resume' if resume else ''} ({path.name})"
-        if not supervisor_alive(runtime):
+        if not supervisor_alive(state):
             msg += ("\nwarning: supervisor is not running; requests are processed by it — "
-                    "run `ads restart supervisor` from a shell")
+                    f"run `ads restart supervisor -p {_rt(state).name}` from a shell")
         return msg
     return f"unknown command: /ads {cmd}\n{HELP}"
 
 
 # --- submit ---------------------------------------------------------------------------
 
-def send_input(runtime: Runtime | Path | str, cfg: Any, text: str,
+def send_input(state: StateLike, cfg: Any, text: str,
                force_instruct: bool = False) -> str:
     """Send `text` to the orchestrator as answer (open question) or instruct; return a status."""
     body = text.strip("\n").rstrip()
     if not body.strip():
         return ""
     subject = subject_of(body)
-    q = None if force_instruct else open_question(runtime)
+    q = None if force_instruct else open_question(state)
     try:
         if q is not None:
-            msg = ledger.send(runtime, cfg, from_=HUMAN, to=ORCH, type="answer",
+            msg = ledger.send(state, cfg, from_=HUMAN, to=ORCH, type="answer",
                               subject=subject, body=body + "\n", re=q["id"])
             status = f"answer {msg.id} → orchestrator (re {q['id']})"
         else:
-            msg = ledger.send(runtime, cfg, from_=HUMAN, to=ORCH, type="instruct",
+            msg = ledger.send(state, cfg, from_=HUMAN, to=ORCH, type="instruct",
                               subject=subject, body=body + "\n")
             status = f"instruct {msg.id} → orchestrator" + (
                 f" [{msg.status}]" if msg.status != "queued" else "")
@@ -331,7 +335,7 @@ def send_input(runtime: Runtime | Path | str, cfg: Any, text: str,
     return status
 
 
-def submit_text(runtime: Runtime | Path | str, cfg: Any, text: str) -> str:
+def submit_text(state: StateLike, cfg: Any, text: str) -> str:
     """Handle one submitted input: `/ads` command, `!` forced instruct, answer or instruct.
 
     Returns the status/output text ("" for blank input).
@@ -339,11 +343,11 @@ def submit_text(runtime: Runtime | Path | str, cfg: Any, text: str) -> str:
     if not text.strip():
         return ""
     if is_command(text):
-        return run_command(runtime, cfg, text)
+        return run_command(state, cfg, text)
     stripped = text.lstrip()
     if stripped.startswith("!"):
-        return send_input(runtime, cfg, stripped[1:], force_instruct=True)
-    return send_input(runtime, cfg, text)
+        return send_input(state, cfg, stripped[1:], force_instruct=True)
+    return send_input(state, cfg, text)
 
 
 # --- key probe ------------------------------------------------------------------------
@@ -383,17 +387,17 @@ def key_probe(seconds: float = 5, fd: int | None = None,
 class Editor:
     """PromptSession-based pane-3 editor. Submitting never exits the prompt."""
 
-    def __init__(self, runtime: Runtime | Path | str, cfg: Any, *, input: Any = None,
+    def __init__(self, state: StateLike, cfg: Any, *, input: Any = None,
                  output: Any = None, tick_s: float = TICK_S) -> None:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.enums import EditingMode
         from prompt_toolkit.history import FileHistory
 
-        self.rt = _rt(runtime)
+        self.rt = _rt(state)
         self.cfg = cfg
         self.tick_s = tick_s
         setup_logging(self.rt)
-        hist = self.rt.root / cfg.editor.history_file
+        hist = self.rt.dir / cfg.editor.history_file
         hist.parent.mkdir(parents=True, exist_ok=True)
         self.printed: list[str] = []   # everything printed above the prompt (tests read it)
         self.status = "Enter: send · C-j/Alt+Enter: newline · /ads help"
@@ -534,7 +538,7 @@ class Editor:
     # -- run
 
     def run(self) -> int:
-        log.info("editor start (runtime %s)", self.rt.root)
+        log.info("editor start (project %s, state %s)", self.rt.name, self.rt.dir)
 
         def _pre_run() -> None:
             self.app.create_background_task(self._ticker())
@@ -546,6 +550,6 @@ class Editor:
         return 0
 
 
-def main(runtime: Runtime | Path | str, cfg: Any) -> int:
+def main(state: StateLike, cfg: Any) -> int:
     """Entry point for `ads input`."""
-    return Editor(runtime, cfg).run()
+    return Editor(state, cfg).run()

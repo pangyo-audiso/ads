@@ -102,9 +102,9 @@ def test_busy_without_hook_is_delivered_unconfirmed(make_cell) -> None:
 
 def test_second_supervisor_exits_1(make_cell) -> None:
     cell = make_cell()
-    env = {**os.environ, "ADS_RUNTIME": str(cell.rt.root)}
+    env = {**os.environ, "ADS_RUNTIME": str(cell.rt.runtime), "ADS_STATE_DIR": str(cell.rt.dir)}
     cp = subprocess.run([str(Path(sys.executable).parent / "ads"), "supervisor", "--runtime",
-                         str(cell.rt.root)], capture_output=True, text=True, env=env, timeout=30,
+                         str(cell.rt.runtime)], capture_output=True, text=True, env=env, timeout=30,
                         cwd=REPO)
     assert cp.returncode == 1, cp.stderr
     assert "already running" in cp.stderr and str(os.getpid()) in cp.stderr

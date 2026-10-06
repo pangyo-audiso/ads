@@ -13,14 +13,14 @@ You implement the chunks that **developer** assigns to you. This includes code, 
 - Fix failures that are inside your chunk. Report failures that are outside it; do not fix those.
 
 ### Report to developer (always)
-Write `{runtime}/work/agents/{agent}/reply-<id>.md` with:
+Write `{state_dir}/work/agents/{agent}/reply-<id>.md` with:
 - **Changed files:** the absolute paths, with one line on what changed in each.
 - **Checks:** each command you ran, and whether it passed or failed. For failures, include the key error line (not the full log).
 - **Notes:** deviations from the chunk, assumptions, and follow-ups developer should know about.
 
 Then send it:
 ```
-{ads_bin} send --to developer --type report --re <id> --result success --subject "Re: Chunk <k>" --body-file {runtime}/work/agents/{agent}/reply-<id>.md
+{ads_bin} send --to developer --type report --re <id> --result success --subject "Re: Chunk <k>" --body-file {state_dir}/work/agents/{agent}/reply-<id>.md
 ```
 - Use `--result partial` if some of the chunk is not done, and `--result failure` if it could not be done.
 - **Always report**, even on failure, then end your turn.

@@ -127,22 +127,25 @@ def runtime_conf(runtime: Path | str) -> Path:
     return candidate if candidate.is_file() else DEFAULT_CONF
 
 
-def build_layout(tmux: Tmux, session: str, project: Path | str, runtime: Path | str, *,
-                 supervisor_cmd: Sequence[str] | None = None, width: int = 240,
+def build_layout(tmux: Tmux, session: str, project: Path | str, state, *,
+                 supervisor_cmd: Sequence[str] | None = None,
+                 supervisor_env: Mapping[str, str] | None = None, width: int = 240,
                  height: int = 70) -> dict[str, str]:
-    """Create the ads session and write `work/run/panes.json`; return {role: pane_id}.
+    """Create the ads session and write `<state>/work/run/panes.json`; return {role: pane_id}.
 
+    `state` is the project's ProjectState (or its state dir).
     window 0 "agents": orchestrator | planner / tester | human (tiled 2x2)
     window 1 "team":   evaluator | developer / coder-1 | coder-2
-    window 2 "supervisor" (created with -d): `supervisor_cmd`, or the placeholder.
+    window 2 "supervisor" (created with -d, cwd = runtime): `supervisor_cmd` (with
+    `supervisor_env`), or the placeholder.
     Every pane gets `@ads_role` (and `@ads_state` = "-"); agent panes run PLACEHOLDER
     until the supervisor respawns them. The server is started with `-f <runtime conf>`.
     """
-    from ads.paths import LAYOUT, Runtime
+    from ads.paths import LAYOUT, as_state
 
-    rt = Runtime(Path(runtime))
+    rt = as_state(state)
     if tmux.conf is None:
-        tmux.conf = runtime_conf(rt.root)
+        tmux.conf = runtime_conf(rt.runtime)
     if tmux.has_session(session):
         raise TmuxError(f"session {session} already exists")
     by_slot = {slot: role for role, slot in LAYOUT.items()}
@@ -164,8 +167,9 @@ def build_layout(tmux: Tmux, session: str, project: Path | str, runtime: Path | 
         for line in listing.splitlines():
             idx, pane_id = line.split()
             panes[by_slot[(win, int(idx))]] = pane_id
+    env_args = [a for k, v in (supervisor_env or {}).items() for a in ("-e", f"{k}={v}")]
     sup = tmux.run("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:2",
-                   "-n", WINDOWS[2], "-c", str(rt.root),
+                   "-n", WINDOWS[2], "-c", str(rt.runtime), *env_args,
                    shlex.join(supervisor_cmd) if supervisor_cmd else placeholder)
     panes[SUPERVISOR] = sup
     for role, pane_id in panes.items():
@@ -178,11 +182,11 @@ def build_layout(tmux: Tmux, session: str, project: Path | str, runtime: Path | 
     return ordered
 
 
-def write_panes(runtime, panes: Mapping[str, str]) -> Path:
-    """Atomically write `work/run/panes.json`."""
-    from ads.paths import Runtime
+def write_panes(state, panes: Mapping[str, str]) -> Path:
+    """Atomically write `<state>/work/run/panes.json`."""
+    from ads.paths import as_state
 
-    rt = runtime if isinstance(runtime, Runtime) else Runtime(Path(runtime))
+    rt = as_state(state)
     rt.run.mkdir(parents=True, exist_ok=True)
     tmp = rt.panes_json.with_name("." + rt.panes_json.name + ".tmp")
     tmp.write_text(json.dumps(dict(panes), indent=1) + "\n")
@@ -190,10 +194,10 @@ def write_panes(runtime, panes: Mapping[str, str]) -> Path:
     return rt.panes_json
 
 
-def read_panes(runtime) -> dict[str, str]:
-    from ads.paths import Runtime
+def read_panes(state) -> dict[str, str]:
+    from ads.paths import as_state
 
-    rt = runtime if isinstance(runtime, Runtime) else Runtime(Path(runtime))
+    rt = as_state(state)
     data = json.loads(rt.panes_json.read_text())
     if not isinstance(data, dict):
         raise ValueError(f"{rt.panes_json}: not a JSON object")

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from ads.bus import state as S
-from ads.paths import Runtime
+from ads.paths import ProjectState
 
 T0 = "2026-10-05T10:00:00+09:00"
 T1 = "2026-10-05T10:05:00+09:00"
@@ -54,6 +54,13 @@ ROWS = [
     (st("idle"), "session-end", {}, {"state": "down", "reason": "other"}),
     (st("down", reason="shutdown"), "session-end", {"reason": "other"},
      {"state": "down", "reason": "shutdown"}),
+    # late hooks after `ads stop` never resurrect the agent
+    (st("down", reason="shutdown"), "stop", {}, {"state": "down", "reason": "shutdown"}),
+    (st("down", reason="shutdown"), "stop-failure", {"error_type": "rate_limit"},
+     {"state": "down", "reason": "shutdown"}),
+    (st("down", reason="shutdown"), "prompt-submit", {"prompt": "x"},
+     {"state": "down", "reason": "shutdown"}),
+    (st("down", reason="shutdown"), "respawn", {}, {"state": "starting", "reason": "respawn"}),
     (st("idle"), "session-end", {"reason": "clear"}, {"state": "restarting", "reason": "clear"}),
     (st("busy"), "session-end", {"reason": "resume"}, {"state": "restarting", "reason": "resume"}),
     # supervisor
@@ -142,7 +149,7 @@ def test_default_and_missing_fields() -> None:
 
 
 def test_transition_file(tmp_path: Path) -> None:
-    rt = Runtime(tmp_path)
+    rt = ProjectState.of(tmp_path, "demo")
     assert S.read_state(rt, "planner")["state"] == "down"
     old, new = S.transition(rt, "planner", "respawn")
     assert old["state"] == "down" and new["state"] == "starting"

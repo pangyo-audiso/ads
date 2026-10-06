@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # M0.5 smoke: real `claude -p` with ads-generated settings must fire the ads hooks.
-# Asserts work/logs/hooks.log gained session-start, prompt-submit and stop lines for this run
+# Registers a throw-away project in this runtime (projects/<name>/, removed afterwards) and
+# asserts its work/logs/hooks.log gained session-start, prompt-submit and stop lines for this run
 # (matched by the run's --session-id). Costs one tiny Sonnet request.
 set -euo pipefail
 
@@ -10,18 +11,21 @@ CLAUDE="${ADS_CLAUDE_BIN:-claude}"
 AGENT=planner
 MODEL="${ADS_SMOKE_MODEL:-claude-sonnet-5-5}"
 PROJECT="$(mktemp -d /tmp/ads-smoke-XXXXXX)"
-trap 'rm -rf "$PROJECT"' EXIT
-LOG="$RUNTIME/work/logs/hooks.log"
+STATE="$("$PY" -c 'import sys; from ads.projects import register; s = register(*sys.argv[1:]); s.ensure(); print(s.dir)' "$RUNTIME" "$PROJECT")"
+trap 'rm -rf "$PROJECT" "$STATE"' EXIT
+LOG="$STATE/work/logs/hooks.log"
 SID="$("$PY" -c 'import uuid; print(uuid.uuid4())')"
 
 fail() { echo "smoke_claude: FAIL: $*" >&2; exit 1; }
 
-SETTINGS="$("$PY" - "$RUNTIME" "$PROJECT" "$AGENT" <<'PYEOF'
+SETTINGS="$("$PY" - "$RUNTIME" "$STATE" "$PROJECT" "$AGENT" <<'PYEOF'
 import sys
 from ads.config import load_config
 from ads.launcher import render_agent_files
-runtime, project, agent = sys.argv[1:]
-settings, _prompt = render_agent_files(load_config(runtime=runtime), runtime, project, agent)
+from ads.paths import ProjectState
+runtime, state, project, agent = sys.argv[1:]
+settings, _prompt = render_agent_files(load_config(runtime=runtime), ProjectState.at(state),
+                                       project, agent)
 print(settings)
 PYEOF
 )"
@@ -33,10 +37,10 @@ before=$(wc -l < "$LOG")
 
 echo "smoke_claude: project=$PROJECT session=$SID settings=$SETTINGS"
 out="$(cd "$PROJECT" && env \
-    ADS_AGENT="$AGENT" ADS_RUNTIME="$RUNTIME" ADS_PROJECT="$PROJECT" ADS_BIN="$RUNTIME/.venv/bin/ads" \
+    ADS_AGENT="$AGENT" ADS_RUNTIME="$RUNTIME" ADS_STATE_DIR="$STATE" ADS_PROJECT="$PROJECT" ADS_BIN="$RUNTIME/.venv/bin/ads" \
     CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
     PATH="$RUNTIME/.venv/bin:$PATH" \
-    timeout 180 "$CLAUDE" -p "say ok" --model "$MODEL" --settings "$SETTINGS" --add-dir "$RUNTIME" \
+    timeout 180 "$CLAUDE" -p "say ok" --model "$MODEL" --settings "$SETTINGS" --add-dir "$STATE" \
         --dangerously-skip-permissions --session-id "$SID" </dev/null 2>&1)" || fail "claude -p exited non-zero: $out"
 echo "smoke_claude: claude said: $out"
 

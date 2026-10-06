@@ -17,16 +17,14 @@ from ads import editor as E
 from ads.bus import ledger as L
 from ads.bus import store
 from ads.config import default_config
-from ads.paths import Runtime
+from ads.paths import ProjectState
 
 EXIT = "\x03\x03"  # C-c C-c
 
 
 @pytest.fixture
-def rt(tmp_runtime: Path) -> Runtime:
-    r = Runtime(tmp_runtime)
-    r.ensure()
-    return r
+def rt(tmp_state: ProjectState) -> ProjectState:
+    return tmp_state
 
 
 @pytest.fixture
@@ -34,11 +32,11 @@ def cfg():
     return default_config()
 
 
-def sent(rt: Runtime) -> list:
+def sent(rt: ProjectState) -> list:
     return [m for m in store.all_messages(rt) if m.from_ == "human"]
 
 
-def run_keys(rt: Runtime, cfg, *chunks: str, gap: float = 0.15) -> E.Editor:
+def run_keys(rt: ProjectState, cfg, *chunks: str, gap: float = 0.15) -> E.Editor:
     """Feed key chunks into a live editor (`gap` seconds apart), then C-c C-c."""
     with create_pipe_input() as inp:
         ed = E.Editor(rt, cfg, input=inp, output=DummyOutput(), tick_s=0.05)
@@ -56,7 +54,7 @@ def run_keys(rt: Runtime, cfg, *chunks: str, gap: float = 0.15) -> E.Editor:
     return ed
 
 
-def ask(rt: Runtime, cfg, subject: str = "Which DB?") -> str:
+def ask(rt: ProjectState, cfg, subject: str = "Which DB?") -> str:
     return L.send(rt, cfg, from_="orchestrator", to="human", type="question",
                   subject=subject, body="Postgres or SQLite?\n").id
 
@@ -129,6 +127,7 @@ def test_commands_render(rt, cfg):
     qid = ask(rt, cfg)
     status = E.submit_text(rt, cfg, "/ads status")
     assert "orchestrator" in status and "phase" in status
+    assert status.startswith(f"project: demo ({rt.runtime.parent / 'demo'})")
     inbox = E.submit_text(rt, cfg, "/ads inbox")
     assert qid in inbox and "OPEN QUESTION" in inbox
     assert "/ads restart" in E.submit_text(rt, cfg, "/ads help")
@@ -189,7 +188,8 @@ def test_app_history(rt, cfg):
     run_keys(rt, cfg, "first input\r", "\x1b[A", "\r")
     msgs = sent(rt)
     assert [m.subject for m in msgs] == ["first input", "first input"]
-    hist = (rt.root / cfg.editor.history_file).read_text()
+    hist = (rt.dir / cfg.editor.history_file).read_text()
+    assert rt.dir / cfg.editor.history_file == rt.input_history
     assert "+first input" in hist
 
 

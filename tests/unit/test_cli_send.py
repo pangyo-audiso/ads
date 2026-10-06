@@ -13,19 +13,18 @@ from ads import cli
 from ads.bus import ledger as L
 from ads.bus import state as S
 from ads.bus import store
-from ads.paths import Runtime
+from ads.paths import ProjectState
 
 REPO = Path(__file__).resolve().parents[2]
 ADS = REPO / ".venv" / "bin" / "ads"
 
 
 @pytest.fixture
-def rt(tmp_runtime: Path, monkeypatch: pytest.MonkeyPatch) -> Runtime:
-    monkeypatch.setenv("ADS_RUNTIME", str(tmp_runtime))
+def rt(tmp_state: ProjectState, monkeypatch: pytest.MonkeyPatch) -> ProjectState:
+    """The only registered project of the runtime: selected without -p or env."""
+    monkeypatch.setenv("ADS_RUNTIME", str(tmp_state.runtime))
     monkeypatch.delenv("ADS_AGENT", raising=False)
-    r = Runtime(tmp_runtime)
-    r.ensure()
-    return r
+    return tmp_state
 
 
 def ads(*argv: str, capsys) -> tuple[int, str, str]:
@@ -34,10 +33,10 @@ def ads(*argv: str, capsys) -> tuple[int, str, str]:
     return code, out, err
 
 
-def sub(rt: Runtime, *argv: str, stdin: str | None = None, agent: str | None = None
+def sub(rt: ProjectState, *argv: str, stdin: str | None = None, agent: str | None = None
         ) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if k != "ADS_AGENT"}
-    env["ADS_RUNTIME"] = str(rt.root)
+    env["ADS_RUNTIME"] = str(rt.runtime)
     if agent:
         env["ADS_AGENT"] = agent
     return subprocess.run([str(ADS), *argv], input=stdin, capture_output=True, text=True, env=env,
@@ -46,7 +45,7 @@ def sub(rt: Runtime, *argv: str, stdin: str | None = None, agent: str | None = N
 
 # --- send -------------------------------------------------------------------------------
 
-def test_send_prints_id_and_writes_message(rt: Runtime, capsys) -> None:
+def test_send_prints_id_and_writes_message(rt: ProjectState, capsys) -> None:
     code, out, err = ads("send", "--from", "human", "--to", "orchestrator", "--type", "instruct",
                          "--subject", "Build it", "--body", "do the thing", capsys=capsys)
     assert code == 0 and err == ""
@@ -58,7 +57,7 @@ def test_send_prints_id_and_writes_message(rt: Runtime, capsys) -> None:
     assert L.get_task(rt, mid)["state"] == "queued"
 
 
-def test_send_from_defaults_to_env_and_body_stdin(rt: Runtime) -> None:
+def test_send_from_defaults_to_env_and_body_stdin(rt: ProjectState) -> None:
     cp = sub(rt, "send", "--to", "planner", "--type", "info", "--subject", "fyi",
              "--body-file", "-", stdin="from stdin\n", agent="orchestrator")
     assert cp.returncode == 0, cp.stderr
@@ -69,7 +68,7 @@ def test_send_from_defaults_to_env_and_body_stdin(rt: Runtime) -> None:
     assert cp.returncode == 0 and store.read_body(rt, cp.stdout.strip()) == "dash body\n"
 
 
-def test_send_body_file(rt: Runtime, tmp_path: Path, capsys) -> None:
+def test_send_body_file(rt: ProjectState, tmp_path: Path, capsys) -> None:
     f = tmp_path / "body.md"
     f.write_text("# Plan\nline\n")
     code, out, _ = ads("send", "--from", "human", "--to", "planner", "--type", "info",
@@ -77,7 +76,7 @@ def test_send_body_file(rt: Runtime, tmp_path: Path, capsys) -> None:
     assert code == 0 and store.read_body(rt, out.strip()) == "# Plan\nline\n"
 
 
-def test_send_held_reports_holder(rt: Runtime, capsys) -> None:
+def test_send_held_reports_holder(rt: ProjectState, capsys) -> None:
     _, first, _ = ads("send", "--from", "orchestrator", "--to", "planner", "--type", "instruct",
                       "--subject", "a", "--body", "b", capsys=capsys)
     code, out, _ = ads("send", "--from", "orchestrator", "--to", "developer", "--type",
@@ -98,13 +97,13 @@ def test_send_held_reports_holder(rt: Runtime, capsys) -> None:
     (["--from", "human", "--to", "planner", "--type", "info", "--subject", "s",
       "--body-file", "/nonexistent/x.md"], "--body-file"),
 ])
-def test_send_errors_exit_1(rt: Runtime, capsys, argv, needle) -> None:
+def test_send_errors_exit_1(rt: ProjectState, capsys, argv, needle) -> None:
     code, out, err = ads("send", *argv, capsys=capsys)
     assert code == 1 and out == "" and needle in err
     assert store.all_messages(rt) == []
 
 
-def test_send_reply_closes_task_and_bumps_progress_once(rt: Runtime, capsys) -> None:
+def test_send_reply_closes_task_and_bumps_progress_once(rt: ProjectState, capsys) -> None:
     _, out, _ = ads("send", "--from", "orchestrator", "--to", "planner", "--type", "instruct",
                     "--subject", "plan", "--body", "b", capsys=capsys)
     tid = out.strip()
@@ -116,7 +115,7 @@ def test_send_reply_closes_task_and_bumps_progress_once(rt: Runtime, capsys) -> 
     assert S.read_state(rt, "planner")["progress_this_turn"] == 1
 
 
-def test_requeue_failed(rt: Runtime, capsys) -> None:
+def test_requeue_failed(rt: ProjectState, capsys) -> None:
     _, out, _ = ads("send", "--from", "human", "--to", "planner", "--type", "info",
                     "--subject", "s", "--body", "b", capsys=capsys)
     mid = out.strip()
@@ -131,7 +130,7 @@ def test_requeue_failed(rt: Runtime, capsys) -> None:
     assert rt.poke.exists()
 
 
-def test_requeue_rejects_non_failed_and_unknown(rt: Runtime, capsys) -> None:
+def test_requeue_rejects_non_failed_and_unknown(rt: ProjectState, capsys) -> None:
     _, out, _ = ads("send", "--from", "human", "--to", "planner", "--type", "info",
                     "--subject", "s", "--body", "b", capsys=capsys)
     code, _, err = ads("send", "--requeue", out.strip(), capsys=capsys)
@@ -142,7 +141,7 @@ def test_requeue_rejects_non_failed_and_unknown(rt: Runtime, capsys) -> None:
 
 # --- status -----------------------------------------------------------------------------
 
-def test_status_json_structure(rt: Runtime, capsys) -> None:
+def test_status_json_structure(rt: ProjectState, capsys) -> None:
     S.transition(rt, "planner", "session-start", {"source": "startup"})
     _, out, _ = ads("send", "--from", "orchestrator", "--to", "planner", "--type", "instruct",
                     "--subject", "plan", "--body", "b", capsys=capsys)
@@ -177,7 +176,7 @@ def test_status_json_structure(rt: Runtime, capsys) -> None:
     assert any(m["id"] == held for m in d["messages"])
 
 
-def test_status_human_readable(rt: Runtime, capsys) -> None:
+def test_status_human_readable(rt: ProjectState, capsys) -> None:
     ads("send", "--from", "orchestrator", "--to", "planner", "--type", "instruct",
         "--subject", "plan", "--body", "b", capsys=capsys)
     ads("send", "--from", "orchestrator", "--to", "developer", "--type", "instruct",
@@ -190,7 +189,7 @@ def test_status_human_readable(rt: Runtime, capsys) -> None:
         assert agent in out
 
 
-def test_status_dead_supervisor(rt: Runtime) -> None:
+def test_status_dead_supervisor(rt: ProjectState) -> None:
     rt.supervisor_pid.write_text("999999999\n")
     d = json.loads(sub(rt, "status", "--json").stdout)
     assert d["supervisor"] == {"pid": 999999999, "alive": False,
@@ -199,8 +198,8 @@ def test_status_dead_supervisor(rt: Runtime) -> None:
 
 # --- note -------------------------------------------------------------------------------
 
-def test_note_appends_under_lab_notes(rt: Runtime) -> None:
-    rt.claude_md.write_text("# Runtime\n\n## Lab Notes\n<!-- comment -->\n- [2026-01-01 human] old\n"
+def test_note_appends_under_lab_notes(rt: ProjectState) -> None:
+    rt.claude_md.write_text("# ProjectState\n\n## Lab Notes\n<!-- comment -->\n- [2026-01-01 human] old\n"
                             "\n## Other\nkeep me\n")
     cp = sub(rt, "note", "multi\nline  note", agent="planner")
     assert cp.returncode == 0, cp.stderr
@@ -213,7 +212,7 @@ def test_note_appends_under_lab_notes(rt: Runtime) -> None:
     assert "human] by hand" in rt.claude_md.read_text()
 
 
-def test_note_creates_section_and_file(rt: Runtime) -> None:
+def test_note_creates_section_and_file(rt: ProjectState) -> None:
     rt.claude_md.unlink(missing_ok=True)
     assert sub(rt, "note", "hello").returncode == 0
     lines = rt.claude_md.read_text().splitlines()
@@ -223,14 +222,14 @@ def test_note_creates_section_and_file(rt: Runtime) -> None:
     assert rt.claude_md.read_text().startswith("# Title\nbody\n\n## Lab Notes\n- [")
 
 
-def test_note_warns_over_80(rt: Runtime) -> None:
+def test_note_warns_over_80(rt: ProjectState) -> None:
     rt.claude_md.write_text("## Lab Notes\n" + "".join(f"- [2026-01-01 human] n{i}\n"
                                                         for i in range(80)))
     cp = sub(rt, "note", "one more")
     assert cp.returncode == 0 and "81 entries" in cp.stderr and "warning" in cp.stderr
 
 
-def test_note_concurrent(rt: Runtime) -> None:
+def test_note_concurrent(rt: ProjectState) -> None:
     rt.claude_md.write_text("## Lab Notes\n")
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(8) as ex:
@@ -242,25 +241,26 @@ def test_note_concurrent(rt: Runtime) -> None:
 
 # --- misc -------------------------------------------------------------------------------
 
-def test_hook_dispatch_via_cli_main(rt: Runtime, monkeypatch, capsys) -> None:
+def test_hook_dispatch_via_cli_main(rt: ProjectState, monkeypatch, capsys) -> None:
     monkeypatch.setenv("ADS_AGENT", "planner")
+    monkeypatch.setenv("ADS_STATE_DIR", str(rt.dir))
     import io
     monkeypatch.setattr("sys.stdin", io.StringIO('{"reason": "logout"}'))
     assert cli.main(["hook", "session-end"]) == 0
     assert S.read_state(rt, "planner")["reason"] == "logout"
 
 
-def test_attach_without_session(rt: Runtime, capsys) -> None:
+def test_attach_without_session(rt: ProjectState, capsys) -> None:
     code, _, err = ads("attach", capsys=capsys)
     assert code == 1 and "no ads session recorded" in err
 
 
-def test_stop_without_session(rt: Runtime, capsys) -> None:
+def test_stop_without_session(rt: ProjectState, capsys) -> None:
     code, _, err = ads("stop", capsys=capsys)
     assert code == 1 and "no ads session recorded" in err
 
 
-def test_restart_agent_writes_request(rt: Runtime, capsys) -> None:
+def test_restart_agent_writes_request(rt: ProjectState, capsys) -> None:
     import json
     code, out, err = ads("restart", "planner", "--resume", capsys=capsys)
     assert code == 0 and "restart requested: planner --resume" in out

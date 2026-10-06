@@ -9,7 +9,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from ads.paths import Runtime
+from ads.paths import ProjectState, StateLike, as_state
 
 # --- protocol constants ---------------------------------------------------------
 
@@ -157,15 +157,15 @@ def validate_result(msg_type: str, result: str | None) -> None:
 
 # --- pointer ----------------------------------------------------------------------
 
-def body_path(runtime: Runtime | Path | str, msg_id: str) -> Path:
-    rt = runtime if isinstance(runtime, Runtime) else Runtime(Path(runtime))
+def body_path(state: StateLike, msg_id: str) -> Path:
+    rt = as_state(state)
     return rt.msgs / f"{msg_id}.md"
 
 
-def pointer_line(msg: Message, runtime: Runtime | Path | str) -> str:
+def pointer_line(msg: Message, state: StateLike) -> str:
     """The single line pasted into the recipient's pane (no newline, ≤ 400 chars)."""
     line = (f"[ADS-MSG id={msg.id} from={msg.from_} type={msg.type}] "
-            f"Read {body_path(runtime, msg.id)} and follow the ADS protocol.")
+            f"Read {body_path(state, msg.id)} and follow the ADS protocol.")
     if msg.supersedes:
         line += f" SUPERSEDES {msg.supersedes}: abort that task first."
     if "\n" in line or "\r" in line:

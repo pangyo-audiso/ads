@@ -13,7 +13,7 @@ from ads.bus import store
 from ads.bus.envelope import (MSG_TYPES, POINTER_MAX, POINTER_RE, REPLY_TYPES, RESULTS,
                               STATUSES, SUBJECT_MAX, TASK_TYPES, Message, make_id,
                               parse_pointer, pointer_line, sanitize_subject)
-from ads.paths import Runtime
+from ads.paths import ProjectState
 
 NASTY = [
     'He said "quote" and \'single\'',
@@ -53,7 +53,7 @@ def test_make_id() -> None:
 
 @pytest.mark.parametrize("subject", NASTY)
 def test_pointer_round_trip_nasty_subjects(tmp_runtime: Path, subject: str) -> None:
-    rt = Runtime(tmp_runtime)
+    rt = ProjectState.of(tmp_runtime, "demo")
     body = f"Subject was: {subject}\n" + "B" * 2048 + "\nend\n"
     msg = store.create(rt, from_="orchestrator", to="planner", type="instruct",
                        subject=subject, body=body)
@@ -82,7 +82,7 @@ def test_sanitize_subject() -> None:
 
 
 def test_pointer_supersedes_suffix(tmp_runtime: Path) -> None:
-    rt = Runtime(tmp_runtime)
+    rt = ProjectState.of(tmp_runtime, "demo")
     old = store.create(rt, from_="human", to="orchestrator", type="instruct", body="a")
     new = store.create(rt, from_="human", to="orchestrator", type="instruct",
                        subject="Cancel", body="cancel", supersedes=old.id)
@@ -94,7 +94,7 @@ def test_pointer_supersedes_suffix(tmp_runtime: Path) -> None:
 
 
 def test_pointer_too_long_runtime_raises(tmp_path: Path) -> None:
-    rt = Runtime(tmp_path / ("d" * 390))
+    rt = ProjectState.of(tmp_path, "d" * 380)
     msg = Message(id="m-20261005-000001", seq=1, from_="a", to="b", type="info")
     with pytest.raises(ValueError):
         pointer_line(msg, rt)

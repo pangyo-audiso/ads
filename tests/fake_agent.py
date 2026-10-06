@@ -16,8 +16,9 @@ Bracketed paste is enabled; pasted text goes into the input line. Enter submits:
 (a block decision means: stay busy another FAKE_BUSY_S and call stop again). At start
 (after the optional dialogs) it calls `hook session-start`.
 
-Knobs: environment `FAKE_<NAME>`, overridden by `$ADS_RUNTIME/fake.json`
-({"*": {...}, "<agent>": {...}}, keys lower-case without the FAKE_ prefix):
+Knobs: environment `FAKE_<NAME>`, overridden by `$ADS_RUNTIME/fake.json`, overridden by the
+project's `$ADS_STATE_DIR/fake.json` ({"*": {...}, "<agent>": {...}}, keys lower-case without
+the FAKE_ prefix):
   DIALOG           "trust", "bypass" or "trust,bypass": render the fixture; needs Down then
                    Enter (Enter on "No, exit" exits 1). An entry containing "/" is a file
                    rendered as-is (an "unknown" dialog; Down then Enter also dismisses it).
@@ -56,6 +57,7 @@ HERE = Path(__file__).resolve().parent
 FIXTURES = HERE / "fixtures" / "dialogs"
 AGENT = os.environ.get("ADS_AGENT", "fake")
 RUNTIME = os.environ.get("ADS_RUNTIME")
+STATE_DIR = os.environ.get("ADS_STATE_DIR") or RUNTIME  # <runtime>/projects/<name>
 POINTER_RE = re.compile(r"^\[ADS-MSG id=(m-\d{8}-\d{6,}) from=([\w-]+) type=([\w-]+)\]")
 REPLY = {"instruct": ("report", "success"), "review-request": ("review", "pass"),
          "question": ("answer", None)}
@@ -64,9 +66,9 @@ SPINNER = "*·✢✶✽"
 
 def _knobs() -> dict[str, str]:
     knobs = {k[5:].lower(): v for k, v in os.environ.items() if k.startswith("FAKE_")}
-    if RUNTIME:
+    for base in dict.fromkeys(d for d in (RUNTIME, STATE_DIR) if d):
         try:
-            data = json.loads((Path(RUNTIME) / "fake.json").read_text())
+            data = json.loads((Path(base) / "fake.json").read_text())
             for key in ("*", AGENT):
                 knobs.update({k.lower(): str(v) for k, v in (data.get(key) or {}).items()})
         except (OSError, ValueError, AttributeError):
@@ -250,7 +252,7 @@ class Screen:
 
     def _envelope(self, msg_id: str) -> dict | None:
         try:
-            return json.loads((Path(RUNTIME) / "work" / "msgs" / f"{msg_id}.json").read_text())
+            return json.loads((Path(STATE_DIR) / "work" / "msgs" / f"{msg_id}.json").read_text())
         except (OSError, ValueError, TypeError) as e:
             log("reply-error", error=str(e))
             return None

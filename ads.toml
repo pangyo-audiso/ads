@@ -1,7 +1,7 @@
 # ads (Audiso Development System) configuration. See plan §7.
 
 [ads]
-tmux_socket = "ads"
+tmux_socket = "ads"   # prefix: each project's cell runs on its own server `tmux -L ads-<project name>`
 tmux_prefix = "C-a"   # prefix of the ads tmux server (avoids clashing with an outer tmux)
 attach = true
 claude_bin = "claude"
@@ -53,4 +53,4 @@ max_report_nudges = 2
 
 [editor]
 vi_mode = true
-history_file = "work/input_history"
+history_file = "work/input_history"   # relative to <runtime>/projects/<name>/

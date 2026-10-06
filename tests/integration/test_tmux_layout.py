@@ -9,7 +9,7 @@ import pytest
 
 from ads import dialogs, launcher
 from ads.config import load_config
-from ads.paths import AGENTS, LAYOUT, Runtime
+from ads.paths import AGENTS, LAYOUT, ProjectState
 from ads.tmux import DEFAULT_CONF, Tmux, build_layout, read_panes
 
 from tmuxhelp import FAKE_AGENT, fake_log, wait_for
@@ -22,16 +22,18 @@ POINTER = ("[ADS-MSG id=m-20261005-000001 from=orchestrator type=info] "
 
 @pytest.fixture
 def cell(tmux: Tmux, tmp_runtime: Path, tmp_path: Path):
-    rt = Runtime(tmp_runtime)
-    rt.ensure()
+    from ads.projects import register
     project = tmp_path / "project"
     project.mkdir()
-    panes = build_layout(tmux, "ads-test", project, rt.root)
+    rt = register(tmp_runtime, project)
+    rt.ensure()
+    panes = build_layout(tmux, "ads-test", project, rt)
+    assert rt.panes_json.is_file() and rt.panes_json.is_relative_to(tmp_runtime / "projects")
     return tmux, rt, project, panes
 
 
-def _fake_env(rt: Runtime, project: Path, agent: str, log: Path, **knobs: str) -> dict[str, str]:
-    cfg = load_config(runtime=rt.root)
+def _fake_env(rt: ProjectState, project: Path, agent: str, log: Path, **knobs: str) -> dict[str, str]:
+    cfg = load_config(runtime=rt.runtime)
     env = launcher.agent_env(cfg, rt, project, agent)
     env["FAKE_LOG"] = str(log)
     env.update({f"FAKE_{k.upper()}": v for k, v in knobs.items()})
@@ -85,7 +87,7 @@ def test_layout_uses_runtime_conf(tmux: Tmux, tmp_path: Path) -> None:
     (conf_dir / "ads.tmux.conf").write_text(DEFAULT_CONF.read_text() + "\nset -g @ads_marker yes\n")
     project = tmp_path / "p"
     project.mkdir()
-    build_layout(tmux, "s2", project, rt_root)
+    build_layout(tmux, "s2", project, ProjectState.of(rt_root, "p"))
     assert tmux.conf == conf_dir / "ads.tmux.conf"
     assert tmux.run("show-options", "-g", "-v", "@ads_marker") == "yes"
 

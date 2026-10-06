@@ -1,6 +1,7 @@
 """`ads supervisor`: the single tmux writer (plan §4.7, §5 delivery + failure matrix).
 
-Runs in hidden tmux window 2. One instance per runtime (flock on `work/run/supervisor.pid`).
+Runs in hidden tmux window 2. One instance per project (flock on
+`<runtime>/projects/<name>/work/run/supervisor.pid`); projects run side by side.
 Each iteration (`run_once`, every `tick_ms` or when the poke file's mtime changes):
 
   requests → alerts → pane_dead grace + down cascade → restarting timeout → hold release
@@ -29,7 +30,7 @@ from ads import dialogs, launcher
 from ads.bus import envelope, ledger, store
 from ads.bus import state as agent_state
 from ads.config import Config, load_config
-from ads.paths import AGENTS, HUMAN, Runtime
+from ads.paths import AGENTS, HUMAN, ProjectState, StateLike, as_state
 from ads.tmux import SUPERVISOR, Tmux, TmuxError, read_panes, runtime_conf
 
 RESTARTING_TIMEOUT_S = 60.0   # restarting (SessionEnd clear/resume) without SessionStart → down
@@ -46,14 +47,16 @@ class SupervisorError(RuntimeError):
 
 # --- session.json -----------------------------------------------------------------------
 
-def write_session(runtime: Runtime | Path | str, *, socket: str, session: str,
+def write_session(state: StateLike, *, socket: str, session: str,
                   project: Path | str, resume: bool = False) -> Path:
-    """`work/run/session.json`: what the supervisor (and stop/attach) need to find the cell."""
-    rt = _rt(runtime)
+    """`<state>/work/run/session.json`: what the supervisor (and stop/attach/list) need to
+    find the cell."""
+    rt = _rt(state)
     rt.run.mkdir(parents=True, exist_ok=True)
     data = {"socket": socket, "session": session,
             "project": str(Path(project).expanduser().resolve()),
-            "runtime": str(rt.root), "resume": bool(resume),
+            "runtime": str(rt.runtime), "name": rt.name, "state_dir": str(rt.dir),
+            "resume": bool(resume),
             "created": datetime.now().astimezone().isoformat(timespec="seconds")}
     tmp = rt.session_json.with_name("." + rt.session_json.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=1) + "\n")
@@ -61,8 +64,8 @@ def write_session(runtime: Runtime | Path | str, *, socket: str, session: str,
     return rt.session_json
 
 
-def read_session(runtime: Runtime | Path | str) -> dict[str, Any]:
-    rt = _rt(runtime)
+def read_session(state: StateLike) -> dict[str, Any]:
+    rt = _rt(state)
     try:
         data = json.loads(rt.session_json.read_text())
     except (FileNotFoundError, ValueError) as e:
@@ -73,16 +76,16 @@ def read_session(runtime: Runtime | Path | str) -> dict[str, Any]:
     return data
 
 
-def _rt(runtime: Runtime | Path | str) -> Runtime:
-    return runtime if isinstance(runtime, Runtime) else Runtime(Path(runtime))
+def _rt(state: StateLike) -> ProjectState:
+    return as_state(state)
 
 
-def write_request(runtime: Runtime | Path | str, op: str, **fields: Any) -> Path:
+def write_request(state: StateLike, op: str, **fields: Any) -> Path:
     """Drop `work/run/requests/<ns>-<op>.json` for the supervisor and touch the poke file.
 
     Same format as the editor's `/ads restart`: {"op": "restart", "agent": ..., "resume": ...}.
     """
-    rt = _rt(runtime)
+    rt = _rt(state)
     rt.requests.mkdir(parents=True, exist_ok=True)
     path = rt.requests / f"{time.time_ns()}-{op}.json"
     tmp = path.with_name("." + path.name + ".tmp")
@@ -93,21 +96,33 @@ def write_request(runtime: Runtime | Path | str, op: str, **fields: Any) -> Path
     return path
 
 
-def respawn_supervisor(runtime: Runtime | Path | str) -> str:
+def respawn_supervisor(state: StateLike) -> str:
     """`respawn-pane -k` tmux window 2 with a fresh `ads supervisor`; returns the pane id."""
-    rt = _rt(runtime)
+    rt = _rt(state)
     sess = read_session(rt)
     try:
         pane = read_panes(rt)[SUPERVISOR]
     except (OSError, ValueError, KeyError) as e:
         raise SupervisorError(f"no supervisor pane in {rt.panes_json}: {e}") from None
-    tmux = Tmux(sess["socket"], conf=runtime_conf(rt.root))
+    tmux = Tmux(sess["socket"], conf=runtime_conf(rt.runtime))
     try:
-        tmux.respawn(pane, [str(launcher.ads_bin(rt)), "supervisor", "--runtime", str(rt.root)],
-                     {"ADS_RUNTIME": str(rt.root)}, cwd=rt.root)
+        tmux.respawn(pane, supervisor_argv(rt), cell_env(rt, sess["project"]), cwd=rt.runtime)
     except TmuxError as e:
         raise SupervisorError(str(e)) from None
     return pane
+
+
+def supervisor_argv(state: StateLike, config: str | None = None) -> list[str]:
+    """`ads supervisor --runtime R -p <name> [--config F]` for this project's window 2."""
+    rt = _rt(state)
+    argv = [str(launcher.ads_bin(rt)), "supervisor", "--runtime", str(rt.runtime),
+            "-p", rt.name]
+    return argv + (["--config", config] if config else [])
+
+
+def cell_env(state: StateLike, project: Path | str) -> dict[str, str]:
+    """Env of the supervisor and editor panes: ADS_RUNTIME, ADS_STATE_DIR, ADS_PROJECT."""
+    return {**_rt(state).env(), "ADS_PROJECT": str(project)}
 
 
 # --- single instance --------------------------------------------------------------------
@@ -175,16 +190,16 @@ def _age_s(iso: str | None) -> float:
 
 
 class Supervisor:
-    def __init__(self, runtime: Runtime | Path | str, cfg: Config | None = None, *,
+    def __init__(self, state: StateLike, cfg: Config | None = None, *,
                  tmux: Tmux | None = None, session: dict[str, Any] | None = None,
                  panes: dict[str, str] | None = None, human_argv: list[str] | None = None,
                  log_stdout: bool = False) -> None:
-        self.rt = _rt(runtime)
+        self.rt = _rt(state)
         self.rt.ensure()
-        self.cfg = cfg or load_config(runtime=self.rt.root)
+        self.cfg = cfg or load_config(runtime=self.rt.runtime)
         self.session = session or read_session(self.rt)
         self.project = Path(self.session["project"])
-        self.tmux = tmux or Tmux(self.session["socket"], conf=runtime_conf(self.rt.root))
+        self.tmux = tmux or Tmux(self.session["socket"], conf=runtime_conf(self.rt.runtime))
         try:
             self.panes = panes or read_panes(self.rt)
         except (OSError, ValueError) as e:
@@ -193,7 +208,8 @@ class Supervisor:
         if missing:
             raise SupervisorError(f"{self.rt.panes_json}: no pane for {', '.join(missing)}")
         self.ads_bin = str(launcher.ads_bin(self.rt))
-        self.human_argv = human_argv or [self.ads_bin, "input", "--runtime", str(self.rt.root)]
+        self.human_argv = human_argv or [self.ads_bin, "input", "--runtime",
+                                         str(self.rt.runtime), "-p", self.rt.name]
         self.mem: dict[str, AgentMem] = {a: AgentMem() for a in AGENTS}
         self.lock = PidLock(self.rt.supervisor_pid)
         self.stopping = False
@@ -203,7 +219,7 @@ class Supervisor:
 
     # --- logging ------------------------------------------------------------------------
     def _make_logger(self, stdout: bool) -> logging.Logger:
-        log = logging.getLogger(f"ads.supervisor.{abs(hash(str(self.rt.root))):x}.{id(self):x}")
+        log = logging.getLogger(f"ads.supervisor.{abs(hash(str(self.rt.dir))):x}.{id(self):x}")
         log.setLevel(logging.INFO)
         log.propagate = False
         fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")
@@ -313,7 +329,7 @@ class Supervisor:
 
     def launch_human(self) -> None:
         pane = self.panes[HUMAN]
-        self.tmux.respawn(pane, self.human_argv, {"ADS_RUNTIME": str(self.rt.root)},
+        self.tmux.respawn(pane, self.human_argv, cell_env(self.rt, self.project),
                           cwd=self.project)
         self.tmux.set_pane_opt(pane, "@ads_launched", "1")
         self.log.info("human: editor launched")
@@ -701,8 +717,8 @@ class Supervisor:
 
 # --- `ads supervisor` -------------------------------------------------------------------------------
 
-def main(runtime: Runtime | Path | str, cfg: Config | None = None) -> int:
-    rt = _rt(runtime)
+def main(state: StateLike, cfg: Config | None = None) -> int:
+    rt = _rt(state)
     try:
         sup = Supervisor(rt, cfg, log_stdout=True)
     except SupervisorError as e:

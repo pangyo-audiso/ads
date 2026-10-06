@@ -1,9 +1,11 @@
 """Claude Code hook handlers behind `ads hook <event>` (plan §4.8).
 
-Stdlib + `ads.paths` / `ads.bus.*` only: this runs on every Claude Code event, and
+Stdlib + `ads.paths` / `ads.projects` / `ads.bus.*` only: this runs on every Claude Code event, and
 SessionEnd has a 1 s timeout. Rules:
-- `$ADS_RUNTIME` (an existing dir) and `$ADS_AGENT` must both be set, else exit 0 silently.
-- The raw event is always appended to `work/logs/hooks.log` first (debugging; smoke test).
+- `$ADS_AGENT` and the project state must both be known, else exit 0 silently. The state is
+  `$ADS_STATE_DIR` (an existing dir, `<runtime>/projects/<name>`), else the project
+  `$ADS_PROJECT` registered in `$ADS_RUNTIME`.
+- The raw event is always appended to `<state>/work/logs/hooks.log` first (debugging; smoke test).
 - Any exception is appended to hooks.log as a traceback record; the exit code is always 0
   and nothing is printed for a failed handler.
 """
@@ -22,7 +24,7 @@ from ads.bus import ledger
 from ads.bus import state as agent_state
 from ads.bus import store
 from ads.bus.envelope import parse_pointer
-from ads.paths import Runtime
+from ads.paths import ProjectState, StateLike, as_state
 
 HOOK_EVENT_NAMES: dict[str, str] = {
     "session-start": "SessionStart",
@@ -39,7 +41,7 @@ def _ts() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def _append(rt: Runtime, record: dict[str, Any]) -> None:
+def _append(rt: ProjectState, record: dict[str, Any]) -> None:
     """Append one JSON line to hooks.log (O_APPEND, single write)."""
     line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
     log = rt.logs / "hooks.log"
@@ -51,7 +53,7 @@ def _append(rt: Runtime, record: dict[str, Any]) -> None:
         os.close(fd)
 
 
-def _note(rt: Runtime, agent: str, event: str, note: str, **extra: Any) -> None:
+def _note(rt: ProjectState, agent: str, event: str, note: str, **extra: Any) -> None:
     _append(rt, {"ts": _ts(), "agent": agent, "event": event, "note": note, **extra})
 
 
@@ -62,14 +64,14 @@ def _context(event: str, text: str) -> str:
 
 # --- handlers (each returns the stdout text, or None) -----------------------------------
 
-def on_session_start(rt: Runtime, agent: str, payload: dict[str, Any]) -> str | None:
+def on_session_start(rt: ProjectState, agent: str, payload: dict[str, Any]) -> str | None:
     agent_state.transition(rt, agent, "session-start", payload)
     n = sum(1 for m in store.all_messages(rt)
             if m.to == agent and m.status in ("queued", "held"))
     return _context("session-start", f"ADS: you are {agent}. {n} message(s) pending.")
 
 
-def _front_matter(rt: Runtime, msg_id: str, ptr: dict[str, Any]) -> str:
+def _front_matter(rt: ProjectState, msg_id: str, ptr: dict[str, Any]) -> str:
     try:
         m = store.get(rt, msg_id)
     except store.MessageNotFound:
@@ -88,7 +90,7 @@ def _front_matter(rt: Runtime, msg_id: str, ptr: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def on_prompt_submit(rt: Runtime, agent: str, payload: dict[str, Any]) -> str | None:
+def on_prompt_submit(rt: ProjectState, agent: str, payload: dict[str, Any]) -> str | None:
     prompt = payload.get("prompt")
     ptr = parse_pointer(prompt if isinstance(prompt, str) else None)
     if ptr is None:
@@ -106,16 +108,16 @@ def on_prompt_submit(rt: Runtime, agent: str, payload: dict[str, Any]) -> str | 
     return _context("prompt-submit", _front_matter(rt, ptr["id"], ptr))
 
 
-def _load_cfg(rt: Runtime) -> Any:
+def _load_cfg(rt: ProjectState) -> Any:
     from ads.config import ConfigError, default_config, load_config
     try:
-        return load_config(runtime=rt.root)
+        return load_config(runtime=rt.runtime)
     except ConfigError:
         _note(rt, os.environ.get("ADS_AGENT", "?"), "config", "invalid ads.toml; using defaults")
         return default_config()
 
 
-def on_stop(rt: Runtime, agent: str, payload: dict[str, Any]) -> str | None:
+def on_stop(rt: ProjectState, agent: str, payload: dict[str, Any]) -> str | None:
     reason = ledger.stop_decision(rt, _load_cfg(rt), agent)
     decision = "block" if reason else "allow"
     agent_state.transition(rt, agent, "stop", {**payload, "decision": decision})
@@ -126,7 +128,7 @@ def on_stop(rt: Runtime, agent: str, payload: dict[str, Any]) -> str | None:
     return None
 
 
-def on_stop_failure(rt: Runtime, agent: str, payload: dict[str, Any]) -> str | None:
+def on_stop_failure(rt: ProjectState, agent: str, payload: dict[str, Any]) -> str | None:
     agent_state.transition(rt, agent, "stop-failure", payload)
     if agent_state.alert_needed(payload):
         etype, emsg = agent_state.error_fields(payload)
@@ -141,12 +143,12 @@ def on_stop_failure(rt: Runtime, agent: str, payload: dict[str, Any]) -> str | N
     return None
 
 
-def on_session_end(rt: Runtime, agent: str, payload: dict[str, Any]) -> str | None:
+def on_session_end(rt: ProjectState, agent: str, payload: dict[str, Any]) -> str | None:
     agent_state.transition(rt, agent, "session-end", payload)
     return None
 
 
-HANDLERS: dict[str, Callable[[Runtime, str, dict[str, Any]], str | None]] = {
+HANDLERS: dict[str, Callable[[ProjectState, str, dict[str, Any]], str | None]] = {
     "session-start": on_session_start,
     "prompt-submit": on_prompt_submit,
     "stop": on_stop,
@@ -157,9 +159,22 @@ HANDLERS: dict[str, Callable[[Runtime, str, dict[str, Any]], str | None]] = {
 
 # --- entry point ------------------------------------------------------------------------
 
-def run(event: str, raw: str, runtime: str | Path, agent: str) -> str | None:
+def state_from_env(env: Any) -> ProjectState | None:
+    """$ADS_STATE_DIR (an existing dir); else the project $ADS_PROJECT registered in
+    $ADS_RUNTIME; else None."""
+    sd = env.get("ADS_STATE_DIR")
+    if sd:
+        return ProjectState.at(sd) if Path(sd).is_dir() else None
+    runtime, project = env.get("ADS_RUNTIME"), env.get("ADS_PROJECT")
+    if runtime and project and Path(runtime).is_dir():
+        from ads.projects import find_by_path
+        return find_by_path(runtime, project)
+    return None
+
+
+def run(event: str, raw: str, state_dir: str | Path | ProjectState, agent: str) -> str | None:
     """Log the raw event, dispatch, and return stdout text. Never raises."""
-    rt = Runtime(Path(runtime))
+    rt = as_state(state_dir)
     try:
         try:
             payload: Any = json.loads(raw) if raw.strip() else {}
@@ -189,15 +204,16 @@ def main(event: str, stdin: TextIO | None = None, stdout: TextIO | None = None,
     """`ads hook <event>`: always returns 0."""
     try:
         env = os.environ if env is None else env  # type: ignore[assignment]
-        runtime, agent = env.get("ADS_RUNTIME"), env.get("ADS_AGENT")
-        if not runtime or not agent or not Path(runtime).is_dir():
+        agent = env.get("ADS_AGENT")
+        state = state_from_env(env)
+        if not agent or state is None:
             return 0
         stdin = sys.stdin if stdin is None else stdin
         try:
             raw = "" if stdin is None or stdin.isatty() else stdin.read()
         except (OSError, ValueError, UnicodeDecodeError) as e:
             raw = f"<unreadable stdin: {e}>"
-        out = run(event, raw, runtime, agent)
+        out = run(event, raw, state, agent)
         if out:
             stdout = sys.stdout if stdout is None else stdout
             stdout.write(out + "\n")

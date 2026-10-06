@@ -1,4 +1,4 @@
-"""Runtime paths, fixed pane layout, naming helpers and locked JSON files."""
+"""Project state paths, fixed pane layout, naming helpers and locked JSON files."""
 
 from __future__ import annotations
 
@@ -44,27 +44,60 @@ class OverlapError(ValueError):
     """Project and runtime directories are equal or nested."""
 
 
-@dataclass(frozen=True)
-class Runtime:
-    """Absolute paths inside the runtime directory (plan §3)."""
+PROJECTS_DIR = "projects"
 
-    root: Path
+
+@dataclass(frozen=True)
+class ProjectState:
+    """Absolute paths of one project's state: `<runtime>/projects/<name>/` (plan §3).
+
+    `dir` is the state dir (CLAUDE.md, plan/, work/, project.json); `runtime` is the ads
+    runtime root (ads.toml, .venv, prompt overrides). Everything a cell reads or writes
+    lives under `dir`, so several projects can run from one runtime side by side.
+    """
+
+    dir: Path
+    runtime: Path
+
+    @classmethod
+    def of(cls, runtime: Path | str, name: str) -> "ProjectState":
+        root = Path(runtime).expanduser().absolute()
+        return cls(root / PROJECTS_DIR / name, root)
+
+    @classmethod
+    def at(cls, state_dir: Path | str) -> "ProjectState":
+        """The state at `state_dir`; its runtime is `state_dir/../..` when it sits in a
+        `projects/` dir, else the state dir itself (ad-hoc/test state dirs)."""
+        d = Path(state_dir).expanduser().absolute()
+        return cls(d, d.parent.parent if d.parent.name == PROJECTS_DIR else d)
+
+    @property
+    def name(self) -> str:
+        return self.dir.name
 
     @property
     def config(self) -> Path:
-        return self.root / "ads.toml"
+        return self.runtime / "ads.toml"
+
+    @property
+    def project_json(self) -> Path:
+        return self.dir / "project.json"
 
     @property
     def claude_md(self) -> Path:
-        return self.root / "CLAUDE.md"
+        return self.dir / "CLAUDE.md"
 
     @property
     def plan(self) -> Path:
-        return self.root / "plan"
+        return self.dir / "plan"
+
+    @property
+    def drafts(self) -> Path:
+        return self.plan / "drafts"
 
     @property
     def work(self) -> Path:
-        return self.root / "work"
+        return self.dir / "work"
 
     @property
     def run(self) -> Path:
@@ -132,13 +165,30 @@ class Runtime:
     def state_file(self, agent: str) -> Path:
         return self.state / f"{agent}.json"
 
+    def env(self) -> dict[str, str]:
+        """ADS_RUNTIME / ADS_STATE_DIR for processes of this project's cell."""
+        return {"ADS_RUNTIME": str(self.runtime), "ADS_STATE_DIR": str(self.dir)}
+
     def ensure(self) -> None:
-        """Create all work/ subdirectories."""
+        """Create plan/, plan/drafts/ and all work/ subdirectories."""
         for d in (self.run, self.requests, self.alerts, self.msgs, self.tasks,
-                  self.state, self.reviews, self.logs, self.plan / "drafts"):
+                  self.state, self.reviews, self.logs, self.drafts):
             d.mkdir(parents=True, exist_ok=True)
         for agent in AGENTS:
             self.agent_dir(agent).mkdir(parents=True, exist_ok=True)
+
+
+StateLike = ProjectState | Path | str
+
+
+def as_state(state: StateLike) -> ProjectState:
+    """A ProjectState as is; a path is taken as a state dir (`ProjectState.at`)."""
+    return state if isinstance(state, ProjectState) else ProjectState.at(state)
+
+
+def socket_name(prefix: str, name: str) -> str:
+    """tmux socket of a project's cell: `<prefix>-<project name>`."""
+    return f"{prefix}-{name}"
 
 
 def slugify(text: str, max_len: int = 32) -> str:

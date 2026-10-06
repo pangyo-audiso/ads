@@ -11,8 +11,9 @@ Hook events (payload = the hook's stdin JSON):
   stop            payload["decision"] == "block" → continuing, else → idle
   stop-failure    → idle; last_error = {type, message, alert}; alert iff type ∈ UNRECOVERABLE
   session-end     reason ∈ logout|prompt_input_exit|other (or unknown) → down(reason)
-                  (down(shutdown) is kept: that is `ads stop` killing the pane);
                   clear|resume → restarting(reason)
+  In down(shutdown) every hook event is ignored: `ads stop` killed the pane and late hooks
+  (Stop/SessionEnd racing the kill) must not resurrect it. Only `respawn` leaves it.
 Supervisor events:
   respawn             → starting (seen_session_start=False, progress=0, inflight=None)
   pane_dead           → down(pane_dead) from ANY state
@@ -41,7 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ads.paths import AGENTS, Runtime, locked_json
+from ads.paths import AGENTS, ProjectState, StateLike, as_state, locked_json
 
 STATES: frozenset[str] = frozenset({
     "starting", "idle", "busy", "continuing", "dialog", "restarting", "down",
@@ -131,6 +132,10 @@ def apply(state: dict[str, Any] | None, event: str, payload: dict[str, Any] | No
         new["state"] = st
         new["reason"] = reason
 
+    if event in HOOK_EVENTS and new["state"] == "down" and new.get("reason") == "shutdown":
+        new["last_event"] = event  # late hook after `ads stop`: record it, keep down(shutdown)
+        return new
+
     if event in HOOK_EVENTS:
         sid = p.get("session_id")
         if sid:
@@ -158,9 +163,7 @@ def apply(state: dict[str, Any] | None, event: str, payload: dict[str, Any] | No
                              "alert": etype in UNRECOVERABLE_ERRORS}
     elif event == "session-end":
         reason = p.get("reason") or "other"
-        if new["state"] == "down" and new.get("reason") == "shutdown":
-            pass  # `ads stop` killed the pane: keep down(shutdown)
-        elif reason in SESSION_END_RESTARTING:
+        if reason in SESSION_END_RESTARTING:
             goto("restarting", reason)
         else:
             goto("down", reason)
@@ -195,15 +198,15 @@ def apply(state: dict[str, Any] | None, event: str, payload: dict[str, Any] | No
 
 # --- file wrapper ---------------------------------------------------------------------
 
-def _rt(runtime: Runtime | Path | str) -> Runtime:
-    return runtime if isinstance(runtime, Runtime) else Runtime(Path(runtime))
+def _rt(ps: StateLike) -> ProjectState:
+    return as_state(ps)
 
 
-def read_state(runtime: Runtime | Path | str, agent: str) -> dict[str, Any]:
+def read_state(ps: StateLike, agent: str) -> dict[str, Any]:
     """Current state (default_state() if the file is missing or unreadable)."""
     st = default_state()
     try:
-        data = json.loads(_rt(runtime).state_file(agent).read_text() or "{}")
+        data = json.loads(_rt(ps).state_file(agent).read_text() or "{}")
         if isinstance(data, dict):
             st.update(data)
     except (FileNotFoundError, ValueError):
@@ -211,18 +214,18 @@ def read_state(runtime: Runtime | Path | str, agent: str) -> dict[str, Any]:
     return st
 
 
-def all_states(runtime: Runtime | Path | str) -> dict[str, dict[str, Any]]:
+def all_states(ps: StateLike) -> dict[str, dict[str, Any]]:
     """{agent: state} for every agent in canonical order."""
-    return {a: read_state(runtime, a) for a in AGENTS}
+    return {a: read_state(ps, a) for a in AGENTS}
 
 
-def transition(runtime: Runtime | Path | str, agent: str, event: str,
+def transition(ps: StateLike, agent: str, event: str,
                payload: dict[str, Any] | None = None,
                now: datetime | str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Locked read-apply-write of `work/state/<agent>.json`. Returns (old, new)."""
     if event not in EVENTS:
         raise ValueError(f"unknown state event: {event!r}")
-    path = _rt(runtime).state_file(agent)
+    path = _rt(ps).state_file(agent)
     with locked_json(path) as data:
         old = default_state()
         old.update(copy.deepcopy(data))

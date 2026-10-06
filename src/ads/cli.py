@@ -14,15 +14,19 @@ from pathlib import Path
 from ads import __version__
 
 SUBCOMMANDS = ("start", "stop", "attach", "status", "send", "note", "restart",
-               "doctor", "hook", "supervisor", "input")
+               "doctor", "hook", "supervisor", "input", "list")
 
 # Subcommand -> milestone that implements it (all implemented).
 PENDING: dict[str, str] = {}
 
 
-def _common(p: argparse.ArgumentParser) -> None:
+def _common(p: argparse.ArgumentParser, project: bool = True) -> None:
     p.add_argument("--runtime", help="ads runtime dir (default: $ADS_RUNTIME or nearest ads.toml upward)")
     p.add_argument("--config", help="config file (default: <runtime>/ads.toml)")
+    if project:
+        p.add_argument("-p", "--project", metavar="NAME|PATH",
+                       help="project to act on (default: $ADS_STATE_DIR/$ADS_PROJECT, the "
+                            "project containing the current dir, or the only running one)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,8 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", metavar="COMMAND")
 
     p = sub.add_parser("start", help="start (or attach to) the cell for a project")
-    _common(p)
-    p.add_argument("project")
+    _common(p, project=False)
+    p.add_argument("project", help="project dir; a bare name (no '/') is a sibling of the "
+                                   "runtime: <runtime>/../<name>")
     p.add_argument("--resume", action="store_true", help="resume agents' previous Claude sessions")
     p.add_argument("--no-attach", action="store_true")
     p.add_argument("--yes", "-y", action="store_true", help="create a missing project dir without asking")
@@ -41,8 +46,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--restart", action="store_true", help="kill a running session and start fresh")
     g.add_argument("--attach", action="store_true", help="attach to a running session")
 
-    for name, help_ in (("stop", "stop the running cell"), ("attach", "attach to the running cell")):
-        _common(sub.add_parser(name, help=help_))
+    p = sub.add_parser("stop", help="stop a project's cell")
+    _common(p)
+    p.add_argument("--all", action="store_true", help="stop every running cell of this runtime")
+    _common(sub.add_parser("attach", help="attach to a project's running cell"))
+
+    p = sub.add_parser("list", help="list the projects of this runtime")
+    _common(p, project=False)
+    p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("status", help="show agents, messages and tasks")
     _common(p)
@@ -63,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     body.add_argument("--body")
     body.add_argument("--body-file")
 
-    p = sub.add_parser("note", help="append a Lab Note to the runtime CLAUDE.md")
+    p = sub.add_parser("note", help="append a Lab Note to the project's CLAUDE.md")
     _common(p)
     p.add_argument("text")
 
@@ -74,21 +85,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor", help="check the environment")
     _common(p)
-    p.add_argument("project", nargs="?", help="also check project/runtime overlap")
+    p.add_argument("path", nargs="?", help="also check project/runtime overlap for this project dir")
     p.add_argument("--key-probe", action="store_true", help="print raw bytes of the next key")
 
     p = sub.add_parser("hook", help="(internal) Claude Code hook handler")
     p.add_argument("event")
+    p.add_argument("--runtime")
+    p.add_argument("-p", "--project")
     _common(sub.add_parser("supervisor", help="(internal) delivery loop"))
     _common(sub.add_parser("input", help="(internal) human editor pane"))
     return parser
 
 
 def normalize_argv(argv: Sequence[str]) -> list[str]:
-    """`ads <project> ...` -> `ads start <project> ...`; leading --runtime/--config move after the subcommand."""
+    """`ads <project> ...` -> `ads start <project> ...`; leading --runtime/--config/-p move after
+    the subcommand."""
     argv = list(argv)
     lead: list[str] = []
-    while argv and (argv[0] in ("--runtime", "--config") or argv[0].startswith(("--runtime=", "--config="))):
+    opts = ("--runtime", "--config", "-p", "--project")
+    while argv and (argv[0] in opts or argv[0].startswith(("--runtime=", "--config=", "--project="))):
         lead.append(argv.pop(0))
         if "=" not in lead[-1] and argv:
             lead.append(argv.pop(0))
@@ -190,7 +205,10 @@ def _check_ads_server(socket: str) -> Row | None:
 
 
 def doctor_rows(runtime: Path | None, cfg, project: str | Path | None = None) -> list[Row]:
-    """Environment checks shared by `ads doctor` and the `ads start` preflight."""
+    """Environment checks shared by `ads doctor` and the `ads start` preflight.
+
+    The extended-keys check covers the tmux server of every registered project that runs one
+    (`<[ads] tmux_socket>-<name>`, or the socket recorded in its session.json)."""
     from ads.paths import OverlapError, check_overlap
     rows: list[Row] = [_check_tmux()]
     rows.extend(_check_claude(cfg.ads.claude_bin))
@@ -202,9 +220,10 @@ def doctor_rows(runtime: Path | None, cfg, project: str | Path | None = None) ->
                      "outer tmux needs `set -s extended-keys on` and "
                      "`set -as terminal-features 'xterm*:extkeys'` for Shift+Enter; ads prefix "
                      f"is {cfg.ads.tmux_prefix} (outer keeps C-b)"))
-    server = _check_ads_server(cfg.ads.tmux_socket)
-    if server:
-        rows.append(server)
+    for socket in _project_sockets(runtime, cfg):
+        server = _check_ads_server(socket)
+        if server:
+            rows.append(server)
     if project:
         if runtime is None:
             rows.append((FAIL, "project overlap", "runtime unknown"))
@@ -215,6 +234,20 @@ def doctor_rows(runtime: Path | None, cfg, project: str | Path | None = None) ->
             except OverlapError as e:
                 rows.append((FAIL, "project overlap", str(e)))
     return rows
+
+
+def _project_sockets(runtime: Path | None, cfg) -> list[str]:
+    from ads.paths import socket_name
+    from ads.projects import all_projects, read_session
+    if runtime is None:
+        return []
+    out: list[str] = []
+    for st in all_projects(runtime):
+        for sock in ((read_session(st) or {}).get("socket"),
+                     socket_name(cfg.ads.tmux_socket, st.name)):
+            if sock and sock not in out:
+                out.append(sock)
+    return out
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -236,7 +269,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         rows.append((PASS, "config", str(cfg.source or "built-in defaults")))
     except ConfigError as e:
         rows.append((FAIL, "config", str(e)))
-    rows.extend(doctor_rows(runtime, cfg, args.project))
+    project = args.path
+    if args.project and runtime is not None:
+        from ads.projects import lookup, project_path
+        st = lookup(runtime, args.project)
+        if st is None:
+            rows.append((FAIL, "project", f"unknown project {args.project!r}"))
+        else:
+            rows.append((PASS, "project", f"{st.name}: {project_path(st)} (state {st.dir})"))
+            project = project or project_path(st)
+    elif project and runtime is not None:
+        from ads.projects import resolve_project_arg
+        project = resolve_project_arg(runtime, project)
+    rows.extend(doctor_rows(runtime, cfg, project))
 
     width = max(len(r[1]) for r in rows)
     for status, check, detail in rows:
@@ -250,12 +295,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 # --- hook ----------------------------------------------------------------------------
 
 def cmd_hook(args: argparse.Namespace) -> int:
-    """Claude Code hook: stdlib + ads.bus only (see ads.hooks); always exit 0."""
+    """Claude Code hook: stdlib + ads.bus only (see ads.hooks); always exit 0.
+
+    The project comes from the env ($ADS_STATE_DIR) unless `-p` names one."""
     try:
         from ads.hooks import main as hook_main
+        env = None
+        if args.project:
+            from ads.projects import lookup
+            root = args.runtime or os.environ.get("ADS_RUNTIME")
+            st = lookup(root, args.project) if root else None
+            if st is None:
+                return 0
+            env = {**os.environ, "ADS_STATE_DIR": str(st.dir)}
     except BaseException:  # a hook must never fail the Claude session
         return 0
-    return hook_main(args.event)
+    return hook_main(args.event, env=env)
 
 
 # --- shared helpers --------------------------------------------------------------------
@@ -264,15 +319,25 @@ class CliError(Exception):
     """User-facing error: printed to stderr, exit 1."""
 
 
-def _runtime_cfg(args: argparse.Namespace, need_cfg: bool = True):  # -> (Runtime, Config | None)
+def _root_cfg(args: argparse.Namespace, need_cfg: bool = True):  # -> (Path, Config | None)
+    """The runtime root and (optionally) its config."""
     from ads.config import ConfigError, load_config, resolve_runtime
-    from ads.paths import Runtime
     try:
         root = resolve_runtime(getattr(args, "runtime", None))
         cfg = load_config(getattr(args, "config", None), root) if need_cfg else None
     except ConfigError as e:
         raise CliError(str(e)) from None
-    return Runtime(root), cfg
+    return root, cfg
+
+
+def _runtime_cfg(args: argparse.Namespace, need_cfg: bool = True):  # -> (ProjectState, Config | None)
+    """The selected project's state (see ads.projects.select) and the runtime config."""
+    from ads.projects import ProjectError, select
+    root, cfg = _root_cfg(args, need_cfg)
+    try:
+        return select(root, getattr(args, "project", None)), cfg
+    except ProjectError as e:
+        raise CliError(str(e)) from None
 
 
 def _guard(fn: Callable[[argparse.Namespace], int]) -> Callable[[argparse.Namespace], int]:
@@ -384,6 +449,7 @@ def status_data(rt, cfg) -> dict:
     from ads.bus import ledger, store
     from ads.bus.state import all_states
     from ads.paths import AGENTS
+    from ads.projects import project_path
     msgs = store.all_messages(rt)
     agents: dict = {}
     for name, st in all_states(rt).items():
@@ -403,7 +469,9 @@ def status_data(rt, cfg) -> dict:
              for t in ledger.open_tasks(rt)]
     pending = [m for m in msgs if m.status in ("queued", "held", "delivering")]
     return {
-        "runtime": str(rt.root),
+        "runtime": str(rt.runtime),
+        "project": {"name": rt.name, "path": str(project_path(rt) or ""),
+                    "state_dir": str(rt.dir)},
         "agents": agents,
         "tasks": tasks,
         "messages": [{"id": m.id, "from": m.from_, "to": m.to, "type": m.type,
@@ -423,7 +491,10 @@ def _print_status(d: dict) -> None:
     sup = d["supervisor"]
     sup_txt = (f"alive (pid {sup['pid']})" if sup["alive"]
                else f"not running (stale pid {sup['pid']})" if sup["pid"] else "not running")
-    print(f"runtime: {d['runtime']}   phase: {d['phase'] or '-'}   supervisor: {sup_txt}")
+    p = d["project"]
+    print(f"project: {p['name']} ({p['path'] or '?'})   phase: {d['phase'] or '-'}   "
+          f"supervisor: {sup_txt}")
+    print(f"state: {p['state_dir']}")
     print()
     rows = [("AGENT", "STATE", "REASON", "SINCE", "MODEL", "INFLIGHT", "Q", "H")]
     for name, a in d["agents"].items():
@@ -522,7 +593,7 @@ def add_lab_note(claude_md: Path, lock_path: Path, author: str, text: str,
 
 @_guard
 def cmd_note(args: argparse.Namespace) -> int:
-    """`ads note "text"` -> Lab Notes in <runtime>/CLAUDE.md."""
+    """`ads note "text"` -> Lab Notes in the project's CLAUDE.md (<runtime>/projects/<name>/)."""
     if not args.text.strip():
         raise CliError("empty note")
     rt, _ = _runtime_cfg(args, need_cfg=False)
@@ -601,30 +672,49 @@ def _start_guard(fn):
 def cmd_start(args: argparse.Namespace) -> int:
     """`ads start <project>` / `ads <project>` (plan §10)."""
     from ads.start import start
-    rt, cfg = _runtime_cfg(args)
-    return start(rt, cfg, args.project, resume=args.resume, no_attach=args.no_attach,
+    root, cfg = _root_cfg(args)
+    return start(root, cfg, args.project, resume=args.resume, no_attach=args.no_attach,
                  attach_flag=args.attach, restart_flag=args.restart, yes=args.yes,
                  config_path=args.config)
 
 
 @_start_guard
 def cmd_stop(args: argparse.Namespace) -> int:
-    """`ads stop`: stop the cell recorded in work/run/session.json."""
-    from ads.start import stop
+    """`ads stop [-p P] [--all]`: stop a project's cell (its work/run/session.json), or all."""
+    from ads.start import stop, stop_all
+    if args.all:
+        if args.project:
+            raise CliError("--all and -p are mutually exclusive")
+        root, _ = _root_cfg(args, need_cfg=False)
+        return stop_all(root)
     rt, _ = _runtime_cfg(args, need_cfg=False)
     return stop(rt)
 
 
 @_start_guard
 def cmd_attach(args: argparse.Namespace) -> int:
-    """`ads attach`: attach to the cell recorded in work/run/session.json."""
+    """`ads attach [-p P]`: attach to the project's cell (its work/run/session.json)."""
     from ads.start import cmd_attach as attach
     rt, cfg = _runtime_cfg(args)
     return attach(rt, cfg)
 
 
+@_guard
+def cmd_list(args: argparse.Namespace) -> int:
+    """`ads list [--json]`: the runtime's projects (name, path, running, socket, phase, tasks)."""
+    import json
+    from ads.start import list_data, print_list
+    root, cfg = _root_cfg(args)
+    rows = list_data(root, cfg)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=1))
+    else:
+        print_list(rows)
+    return 0
+
+
 HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
-    "start": cmd_start, "stop": cmd_stop, "attach": cmd_attach,
+    "start": cmd_start, "stop": cmd_stop, "attach": cmd_attach, "list": cmd_list,
     "doctor": cmd_doctor, "hook": cmd_hook, "send": cmd_send, "status": cmd_status,
     "note": cmd_note, "input": cmd_input, "supervisor": cmd_supervisor, "restart": cmd_restart,
 }

@@ -10,12 +10,12 @@ from ads.bus import ledger as L
 from ads.bus import state as S
 from ads.bus import store
 from ads.config import default_config
-from ads.paths import Runtime
+from ads.paths import ProjectState
 
 
 @pytest.fixture
-def rt(tmp_path: Path) -> Runtime:
-    r = Runtime(tmp_path / "runtime")
+def rt(tmp_path: Path) -> ProjectState:
+    r = ProjectState.of(tmp_path / "runtime", "demo")
     r.ensure()
     return r
 

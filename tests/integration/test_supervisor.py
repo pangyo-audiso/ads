@@ -171,7 +171,8 @@ def test_exit_down_after_grace_cascade_then_restart(make_cell) -> None:
     # restart --resume via the CLI request → respawned with the same session uuid → idle
     cell.fake("planner", exit_after="0")
     uuid = json.loads(launcher.session_file(cell.rt, "planner").read_text())["session_id"]
-    assert cli.main(["restart", "planner", "--resume", "--runtime", str(cell.rt.root)]) == 0
+    assert cli.main(["restart", "planner", "--resume", "--runtime", str(cell.rt.runtime),
+                     "-p", cell.rt.name]) == 0
     assert cell.run_until(lambda: cell.state("planner")["state"] == "idle", timeout=15)
     starts = cell.events("planner", "start")
     assert len(starts) == 2
@@ -199,9 +200,9 @@ def test_restart_without_resume_gets_fresh_session(make_cell) -> None:
 
 def test_sigterm_shuts_down_without_cascade(make_cell) -> None:
     cell = make_cell(fake={"planner": {"busy_s": "60"}}, start=False)
-    env = {**os.environ, "ADS_RUNTIME": str(cell.rt.root), "ADS_CLAUDE_BIN": str(FAKE_AGENT)}
+    env = {**os.environ, "ADS_RUNTIME": str(cell.rt.runtime), "ADS_CLAUDE_BIN": str(FAKE_AGENT)}
     proc = subprocess.Popen([str(Path(sys.executable).parent / "ads"), "supervisor", "--runtime",
-                             str(cell.rt.root)], env=env, cwd=REPO, stdout=subprocess.PIPE,
+                             str(cell.rt.runtime), "-p", cell.rt.name], env=env, cwd=REPO, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True)
     try:
         assert wait_for(lambda: set(cell.states().values()) == {"idle"}, timeout=20)

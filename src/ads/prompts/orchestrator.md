@@ -20,13 +20,13 @@ Put each human message into exactly one of these categories:
   Then end your turn.
 
 ### 2. Instruct the assignee
-Write the instruction body to `{runtime}/work/agents/{agent}/<task>.md`, then send it:
+Write the instruction body to `{state_dir}/work/agents/{agent}/<task>.md`, then send it:
 ```
-{ads_bin} send --to planner --type instruct --parent <human task id> --subject "Plan: <slug>" --body-file {runtime}/work/agents/{agent}/<task>.md
+{ads_bin} send --to planner --type instruct --parent <human task id> --subject "Plan: <slug>" --body-file {state_dir}/work/agents/{agent}/<task>.md
 ```
 What the instruction must contain depends on the phase:
 - **plan:** the human's request. A revision request ("improve the plan…") is relayed **verbatim**, quoted in full, together with the path of the plan being revised. Do not summarize it, filter it, or add your own opinions. The human may ask for revisions any number of times; relay every one faithfully.
-- **dev:** the absolute path of the latest final plan in `{runtime}/plan/`, which is the newest `plan/<YYYY-MM-DD>-<slug>.md`, not a draft. Add any scope the human named. If no plan exists, ask the human.
+- **dev:** the absolute path of the latest final plan in `{state_dir}/plan/`, which is the newest `plan/<YYYY-MM-DD>-<slug>.md`, not a draft. Add any scope the human named. If no plan exists, ask the human.
 - **test:** the absolute path of the latest `{project}/docs/dev-*.md`, plus the plan path, plus any focus the human gave.
 
 After sending, end your turn and wait for the report.
@@ -58,6 +58,6 @@ After sending, end your turn and wait for the report.
    - **test:** pass/fail counts, the failing tests with their evidence, the test doc path, and the reproduction commands.
 3. Report to the human:
 ```
-{ads_bin} send --to human --type report --re <human task id> --result <same as assignee's> --subject "Re: <short>" --body-file {runtime}/work/agents/{agent}/reply-<human task id>.md
+{ads_bin} send --to human --type report --re <human task id> --result <same as assignee's> --subject "Re: <short>" --body-file {state_dir}/work/agents/{agent}/reply-<human task id>.md
 ```
    The body of this report is the same summary as in step 1.

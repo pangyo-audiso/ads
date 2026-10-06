@@ -15,18 +15,26 @@ Delivery is confirmed only by the recipient's `UserPromptSubmit` hook, never by 
 
 ## Files
 
-| Path (under `<runtime>/work/`) | Content |
+Every project has its own bus. All paths below are under the project's state dir `<state> = <runtime>/projects/<name>/`, in `<state>/work/`. Nothing is shared between projects except `ads.toml`: messages, tasks, agent states, the sequence counter, the supervisor and its lock, and the tmux server (`ads-<name>`) are all per project, so cells of different projects run concurrently without seeing each other. Processes of a cell (agents, hooks, editor, supervisor, `ads send` run by an agent) find their state through `$ADS_STATE_DIR=<state>` (with `$ADS_RUNTIME`, `$ADS_PROJECT`, `$ADS_AGENT`). A message id is unique only within its project.
+
+| Path (under `<state>/work/`) | Content |
 |---|---|
 | `msgs/<id>.json` | the envelope (below) |
 | `msgs/<id>.md` | the message body (summary + absolute paths; deliverables live in files) |
 | `tasks/<id>.json` | the ledger task for a task-creating message (same id) |
 | `state/<agent>.json` | the agent state machine |
-| `run/seq` | global monotonic sequence counter (flock; never resets) |
+| `run/seq` | the project's monotonic sequence counter (flock; never resets) |
+| `run/session.json` | socket, session, project, name, state_dir, resume flag of the running cell |
+| `run/panes.json` | role → tmux pane id |
+| `run/supervisor.pid` | flock'ed by the project's single supervisor |
 | `run/poke` | touched after every bus change; wakes the supervisor before its next tick |
 | `run/ledger.lock` | re-entrant flock around every ledger read-check-write |
 | `run/requests/*.json` | `restart` / `stop` requests for the supervisor |
 | `run/alerts/*.json` | unrecoverable API errors and failed deliveries |
 | `logs/bus.jsonl` | one JSON line per message/task transition |
+| `reviews/`, `agents/<agent>/` | evaluator reviews; each agent's reply bodies, chunk files and `session.json` (Claude session uuid used by `--resume`) |
+
+Next to `work/`: `<state>/project.json` (`{name, path, created}`), `<state>/CLAUDE.md` (Lab Notes) and `<state>/plan/` + `plan/drafts/`.
 
 Shared JSON is written with `paths.locked_json`: a flock on `<path>.lock`, then read, modify, and an atomic `os.replace`.
 
@@ -89,7 +97,7 @@ queued ──► delivering ──► delivered
 This is the only text ever pasted into an agent's pane. It is one line of at most 400 characters, which stays below Claude Code's paste-collapse threshold:
 
 ```
-[ADS-MSG id=m-20261005-000012 from=orchestrator type=instruct] Read /home/dev1/workspace/vibe-coding/work/msgs/m-20261005-000012.md and follow the ADS protocol.
+[ADS-MSG id=m-20261005-000012 from=orchestrator type=instruct] Read /home/dev1/workspace/vibe-coding/projects/wordcount/work/msgs/m-20261005-000012.md and follow the ADS protocol.
 ```
 
 - A superseding message gets the suffix ` SUPERSEDES <T>: abort that task first.`
@@ -162,7 +170,7 @@ Let `T` be the agent's open incoming tasks that are in state `delivered`. The St
 - the agent has no open outgoing task (an agent that delegated or asked is "waiting");
 - `min(nudges over T) < max_report_nudges` (2).
 
-When it blocks, `nudges` is incremented on every task in `T`. The reason text lists, for each task, the exact `ads send … --re <id> --result … --body-file <runtime>/work/agents/<agent>/reply-<id>.md` command to run. Claude Code continues the turn, and the state becomes `continuing`.
+When it blocks, `nudges` is incremented on every task in `T`. The reason text lists, for each task, the exact `ads send … --re <id> --result … --body-file <state>/work/agents/<agent>/reply-<id>.md` command to run. Claude Code continues the turn, and the state becomes `continuing`.
 
 Once the nudges are exhausted and the agent is idle, the supervisor's `nudge_exhaustion` step does the following:
 
@@ -267,7 +275,7 @@ Recover a `failed` message with `ads send --requeue <id>`, which sets it back to
 
 ## Hooks (`ads hook <event>`, `hooks.py`)
 
-The hooks are installed through `--settings <runtime>/work/agents/<agent>/settings.json`. They use only the standard library and `ads.bus`. Every event is appended to `work/logs/hooks.log` first. A hook never fails the Claude session: errors are logged as traceback records, and the exit code is always 0.
+The hooks are installed through `--settings <state>/work/agents/<agent>/settings.json`, whose `env` carries `ADS_STATE_DIR`, `ADS_RUNTIME`, `ADS_PROJECT` and `ADS_AGENT`. The hook finds its project from `$ADS_STATE_DIR` (falling back to the project `$ADS_PROJECT` registered in `$ADS_RUNTIME`); without a project or an agent it exits 0 silently. They use only the standard library, `ads.projects` and `ads.bus`. Every event is appended to `<state>/work/logs/hooks.log` first. A hook never fails the Claude session: errors are logged as traceback records, and the exit code is always 0.
 
 | Event | Handler |
 |---|---|
@@ -279,4 +287,4 @@ The hooks are installed through `--settings <runtime>/work/agents/<agent>/settin
 
 ## Lab Notes
 
-`ads note "text"` appends `- [YYYY-MM-DD <agent>] text` under `## Lab Notes` in `<runtime>/CLAUDE.md`. The author comes from `$ADS_AGENT`, or is `human`. The write takes a flock and replaces the file atomically. The section is created if it is missing, and a warning is printed above 80 entries. Every agent loads this file through `--add-dir <runtime>` plus `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, and is told to re-read the Lab Notes at the start of each task.
+`ads note "text"` appends `- [YYYY-MM-DD <agent>] text` under `## Lab Notes` in the project's `<state>/CLAUDE.md` (the project is selected as for every command: `-p`, `$ADS_STATE_DIR`, cwd, the only running project). The author comes from `$ADS_AGENT`, or is `human`. The write takes a flock and replaces the file atomically. The section is created if it is missing, and a warning is printed above 80 entries. Every agent of the project loads this file through `--add-dir <state>` plus `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, and is told to re-read the Lab Notes at the start of each task. Agents never load another project's notes, nor the ads repo's own `CLAUDE.md`.

@@ -9,20 +9,21 @@ The human developer types into the orchestrator. orchestrator directs planner, d
 
 ## Where things live
 - Project (your working directory): `{project}`. Source, config, git, and dev/test docs in `{project}/docs/`.
-- ads runtime: `{runtime}`. Contains:
+- This project's ads state (project `{project_name}`): `{state_dir}`. Contains:
   - `plan/`: final plans. `plan/drafts/`: plan drafts.
   - `work/msgs/<id>.md` (message body) and `work/msgs/<id>.json` (envelope).
   - `work/reviews/`: evaluator reviews.
   - `work/agents/{agent}/`: your scratch area for reply bodies.
-  - `CLAUDE.md`: its `## Lab Notes` section is shared by all agents.
+  - `CLAUDE.md`: this project's shared memory; its `## Lab Notes` section is shared by all agents.
+- The ads runtime `{runtime}` may run other projects' cells too. Their state lives in other `projects/<name>/` dirs: never read or write it.
 - Bus command: `{ads_bin}`. `{ads_bin} status` shows open tasks and their ids.
 
 ## Handling a message
 A turn that starts with `[ADS-MSG id=<id> from=<sender> type=<type>] Read <path> ...` is a bus message.
-1. Re-read the `## Lab Notes` section of `{runtime}/CLAUDE.md` at the start of every new task.
+1. Re-read the `## Lab Notes` section of `{state_dir}/CLAUDE.md` at the start of every new task.
 2. Read `<path>` (the body). Read the JSON envelope next to it when you need `re`, `parent` or `result`.
 3. Do the work the message asks for.
-4. Write the reply body to `{runtime}/work/agents/{agent}/reply-<id>.md`. The body holds a short summary plus the **absolute paths** of what you produced or changed. Never paste plans, code, diffs or logs into a message; the deliverables live in files.
+4. Write the reply body to `{state_dir}/work/agents/{agent}/reply-<id>.md`. The body holds a short summary plus the **absolute paths** of what you produced or changed. Never paste plans, code, diffs or logs into a message; the deliverables live in files.
 5. Reply with the type that matches the message:
 
 | You received | You reply with |
@@ -32,7 +33,7 @@ A turn that starts with `[ADS-MSG id=<id> from=<sender> type=<type>] Read <path>
 | question | `--type answer` (no `--result`) |
 
 ```
-{ads_bin} send --to <sender> --type report --re <id> --result success --subject "Re: <short subject>" --body-file {runtime}/work/agents/{agent}/reply-<id>.md
+{ads_bin} send --to <sender> --type report --re <id> --result success --subject "Re: <short subject>" --body-file {state_dir}/work/agents/{agent}/reply-<id>.md
 ```
 6. End your turn. `--to` must be the sender of `<id>`. `report` and `review` require `--result`. Subjects are one short line.
 
@@ -42,7 +43,7 @@ Messages of type `report`, `review`, `answer`, `info` and `system` need no reply
 
 ## Delegating and asking
 - To delegate, send a task-creating message with `--parent <the task id you are working on>`:
-  `{ads_bin} send --to <agent> --type instruct --parent <your task id> --subject "<short>" --body-file {runtime}/work/agents/{agent}/<name>.md`
+  `{ads_bin} send --to <agent> --type instruct --parent <your task id> --subject "<short>" --body-file {state_dir}/work/agents/{agent}/<name>.md`
   Then **end your turn and wait**. The reply arrives later as a new `[ADS-MSG …]` turn. Do not poll, sleep, or loop waiting for it.
 - If `ads send` prints `<id> held behind <task>`, the bus has queued your message. It is delivered automatically when that task closes, so do not resend it.
 - To ask a question, send it to whoever instructed you: `{ads_bin} send --to <instructor> --type question --parent <your task id> --subject "<short>" --body "<question>"`. Then end your turn. The answer arrives as a `type=answer` message.
@@ -64,6 +65,6 @@ Messages of type `report`, `review`, `answer`, `info` and `system` need no reply
 
 ## Hard rules
 - Never run tmux, and never type into or read other panes. The bus is the only channel.
-- Never edit `{runtime}/src/ads` or anything under `{runtime}/work` by hand. The only exceptions are your own files in `{runtime}/work/agents/{agent}/` and evaluator's reviews in `{runtime}/work/reviews/`. A separate ads checkout used as the project is fine.
-- Never edit `{runtime}/CLAUDE.md` directly. Record lessons learned and mistakes not to repeat with `{ads_bin} note "<one line lesson>"`.
+- Never edit `{runtime}/src/ads` or anything under `{state_dir}/work` by hand. The only exceptions are your own files in `{state_dir}/work/agents/{agent}/` and evaluator's reviews in `{state_dir}/work/reviews/`. A separate ads checkout used as the project is fine.
+- Never edit `{state_dir}/CLAUDE.md` directly. Record lessons learned and mistakes not to repeat with `{ads_bin} note "<one line lesson>"`.
 - Stay within your role as described below.

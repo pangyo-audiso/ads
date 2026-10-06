@@ -9,7 +9,7 @@ import pytest
 
 from ads import launcher
 from ads.config import load_config
-from ads.paths import AGENTS
+from ads.paths import AGENTS, ProjectState
 
 
 @pytest.fixture
@@ -25,10 +25,15 @@ def project(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def rendered(cfg, tmp_runtime: Path, project: Path) -> dict[str, str]:
+def st(tmp_runtime: Path) -> ProjectState:
+    return ProjectState.of(tmp_runtime, "proj")
+
+
+@pytest.fixture
+def rendered(cfg, st: ProjectState, project: Path) -> dict[str, str]:
     out = {}
     for agent in AGENTS:
-        _, prompt_path = launcher.render_agent_files(cfg, tmp_runtime, project, agent)
+        _, prompt_path = launcher.render_agent_files(cfg, st, project, agent)
         out[agent] = prompt_path.read_text(encoding="utf-8")
     return out
 
@@ -57,7 +62,8 @@ def test_no_unresolved_placeholders(rendered, agent) -> None:
 
 
 @pytest.mark.parametrize("agent", AGENTS)
-def test_common_contract(rendered, agent, cfg, tmp_runtime: Path, project: Path) -> None:
+def test_common_contract(rendered, agent, cfg, tmp_runtime: Path, st: ProjectState,
+                         project: Path) -> None:
     text = rendered[agent]
     bin_ = str(launcher.ads_bin(tmp_runtime))
     assert Path(bin_).is_absolute()
@@ -65,7 +71,10 @@ def test_common_contract(rendered, agent, cfg, tmp_runtime: Path, project: Path)
     assert f"{bin_} note" in text
     assert f"You are **{agent}**" in text
     assert f"You report to **{cfg.agents[agent].reports_to}**" in text
-    assert f"{tmp_runtime}/work/agents/{agent}/" in text
+    assert f"{st.dir}/work/agents/{agent}/" in text
+    assert f"{st.dir}/CLAUDE.md" in text and "project `proj`" in text
+    assert f"{tmp_runtime}/work" not in text and f"{tmp_runtime}/plan" not in text
+    assert f"{tmp_runtime}/CLAUDE.md" not in text
     assert str(project) in text
     assert "[ADS-MSG" in text and "SUPERSEDES" in text
     assert "--body-file" in text and "--parent" in text and "--result failure" in text
@@ -90,15 +99,15 @@ def test_no_tmux_key_bindings(rendered) -> None:
         assert "send-keys" not in text and "C-a" not in text, agent
 
 
-def test_override_precedence(cfg, tmp_runtime: Path, project: Path) -> None:
+def test_override_precedence(cfg, tmp_runtime: Path, st: ProjectState, project: Path) -> None:
     over = tmp_runtime / ".claude/ads/prompts"
     over.mkdir(parents=True)
     (over / "planner.md").write_text("## Role: planner\nOVERRIDDEN planner for {agent} via {ads_bin}\n")
-    _, prompt_path = launcher.render_agent_files(cfg, tmp_runtime, project, "planner")
+    _, prompt_path = launcher.render_agent_files(cfg, st, project, "planner")
     text = prompt_path.read_text()
     assert f"OVERRIDDEN planner for planner via {launcher.ads_bin(tmp_runtime)}" in text
     assert "/plan/drafts/" not in text  # packaged planner.md not used
     assert "You are **planner**" in text  # packaged common.md still used
     # other agents unaffected
-    _, dev_path = launcher.render_agent_files(cfg, tmp_runtime, project, "developer")
+    _, dev_path = launcher.render_agent_files(cfg, st, project, "developer")
     assert "OVERRIDDEN" not in dev_path.read_text()

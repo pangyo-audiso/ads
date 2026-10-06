@@ -1,4 +1,5 @@
 work/
+projects/
 .venv/
 __pycache__/
 *.egg-info/
