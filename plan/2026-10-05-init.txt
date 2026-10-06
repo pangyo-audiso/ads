@@ -1,0 +1,54 @@
+다음과 같은 TUI 기반 개발환경 셋업 시스템을 만들어줘.
+
+# 개요
+  * 이 프로그램의 이름은 ads (Audiso Development System) 라고 명명한다. (우리회사 이름이 Audiso 이다)
+  * ads 는 tmux 기반 multi-agent 개발환경 셋업 시스템이다.
+  * 각 AI Agent 는 Anthropic 의 Claude 기반의 Agent 로 구동한다.
+
+# 구현내용
+  * tmux 기반 multi-agent 개발환경은 기본적으로 다음과 같이 2개의 Windows 로 구성한다.
+    * 0번 Window: 아래와 같이 4개의 pane 으로 구성되어 각 pane 에서는 마지막 3번 pane을 제외하고 1개의 AI Agent 을 수행한다. 각 pane 은 orchestrator 의 지시를 받은 후 반드시 실행 결과를 orchestrator 에게 보고한다.
+       0번 pane: orchestrator - 아래 3번 pane 으로부터 개발자의 지시사항을 전달받고, 실행 결과는 자신의 pane 에 출력함
+           - orchestrator 는 개발자의 지시의 성격이 planning 인지, development 인지, test 인지에 따라 아래의 각 window/pane 에게 할당된 Agent 에게 전달 사항을 정확히 지시한다.
+             - 개발자는 아래 planner 가 수립한 계획을 몇 번이고 개선하라고 요청할 수 있으며, orchestrator 는 해당 지시를 성실하게 planner 에게 지시/전달해야 한다.
+             - planner 가 수립을 완료하면 해당 내용을 developer 에게 전달하여 구현하도록 한다.
+             - developer 가 구현을 완료하면 해당 내용을 tester 에게 전달하여 테스트하도록 한다.
+             - tester 가 테스트를 완료하면 해당 내용을 개발자가 볼 수 있도록 자신의 pane 에 결과를 출력한다.
+             - 개발자의 지시사항에 따라 planning, development, test 등 1개의 task 만을 실행할 수 있으므로 개발자의 의도를 잘 파악해야 한다.
+           - orchestrator 가 사용할 LLM 은 기본적으로 Opus 5.5 을 사용한다.
+       1번 pane: planner - orchestrator 의 지시에 따라 플랜을 수립한 후 결과를 orchestrator 에게 보고한다.
+           - planner 가 수립한 계회은 아래 1번 Window의 0번째 pane 에 할당된 evaluator 의 검증을 받아야 하며, evaluator 의 의견 등을 충실히 반영한 후 orchestrator 에게 보고할 때는 evaluator 의 검증을 받았다는 내용이 포함되어야 한다.
+           - 검증을 마친 플랜은 plan 폴더 밑에 .md 파일로 작성한다.
+           - planner 가 사용할 LLM 은 기본적으로 Fable 5.1 을 사용한다.
+       2번 pane: tester - orchestrator 의 지시에 따라 테스트를 진행한다.
+           - planner 가 사용할 LLM 은 기본적으로 Sonnet 5.5 을 사용한다.
+       3번 pane: 개발자가 지시할 사항을 입력하는 pane 으로, 해당 입력 내용은 0번 pane 의 orchestrator 에 전달된다.
+           - 사용자가 Shift+Enter 을 입력하면 입력하던 텍스트 다음줄에 계속하여 입력할 수 있도록 한다.
+           - 기본적으로 vim 모드 처럼 내용을 수정할 수 있어야 한다.
+           - 개발자는 해당 pane 에서 이전에 입력했던 history 을 거꾸로 올라가면서 조회해 볼 수 있어야 한다.
+    * 1번 Window: 아래와 같이 4개의 pane 으로 구성되어 각 pane 에서는 1개의 AI Agent 을 수행한다.
+       0번 pane: evaluator - 위의 1번 pane의 planner 가 작성한 플랜을 심도있게(thoroughly) 검토하고 검토한 결과를 다시 planner 에게 전달한다.
+           - 이때 evaluator 는 다음의 항목을 철저하게 검토한다.
+             - 플랜의 각 항목에 누락된 부분이나 오류가 없는지, 각 항목간에 상충된 내용이나 순서가 뒤바낀 사항은 없는지, 그리고 좀 더 나은 개선 사항은 없는지 검토한다.
+           - evaluator 가 사용할 LLM 은 기본적으로 Fable 5.1 을 사용한다.
+       1번 pane: developer - orchestrator 의 지시에 따라 planner 가 수립한 플랜을 전달받아 구현한다. 단, 직접 구현하는 대신 아래의 2개 coder 들에게 코딩을 지시한다.
+           - developer 가 사용할 LLM 은 기본적으로 Sonnet 5.5 을 사용한다.
+           - developer 는 coder 들에게 coding 외에 시스템 셋업, config. 설정 작업 등을 지시한다.
+           - developer 는 coder 들에게 일을 지시할 때 너무 많은 분량을 할당하면 안된다.
+           - 개발할 분량이 많을 경우 coder 들에게 일을 지시할 때 적당량을 할당하여 지시하되, 반드시 할당한 일이 완료도었음을 보고 받은 후 다음 일을 지시한다.
+           - orchestrator 에게 지시 받은 일을 모두 완료하면 (그 결과가 실패했을지라도) orchestrator 에게 반드시 보고한다.
+       2번 pane: coder-1 - developer 지시한 내용을 구현한 후 결과를 반드시 developer 에게 보고한다.
+       3번 pane: coder-2 - developer 지시한 내용을 구현한 후 결과를 반드시 developer 에게 보고한다.
+
+
+# 기타
+  * pane 간의 통신은 기본적으로 tmux 의 send-keys 을 통해 이루어지며(capture-pane,  pipe-pane 등 사용가능), pane 간의 전달사항(지시, 보고 등)과 실제 content 가 혼선을 빚지 않도록 한다.
+  * 각 Agent 는 자신의 실행 결과를 반드시 지시자에게 보고해야 하며, 자신이 이전 명령어를 실행 중일지라도 항상 send-key 등을 통해 전달된 지시사항이 누락되지 않도록 한다.
+  * 이 개발환경을 실행할 때는 기본적으로 cladue (또는 claude code) 기반으로 기동되며, 기본적으로 프로젝트가 존재하는 폴더 path 을 argument (필수)로 받는다.
+    - 해당 폴더가 존재하지 않을 경우 해당 폴더를 생성할지 개발자에게 확인을 받는다. (해당 폴더를 생성하지 않겠다고 개발자가 의사를 밝히면 그냥 종료하면 된다.)
+    - 해당 폴더가 존재할 경우 해당 폴더에 있는 소스 등을 기반으로 개발을 이어나가면 된다.
+  * 요약하자면 폴더는 다음과 같이 2개로 분리된다.
+    - 이 tmux 기반 multi-agent 가 실행되는 폴더: 여기에 .claude, plan, work 등의 폴더와 CLAUDE.md 등의 파일이 위치한다.
+      - CLAUDE.md 에는 "Lab Notes" 항목이 있어서 위의 모든 Agent 가 공유한다. 여기에는 실수를 했을 때는 다시 실수하지 말아야 할 것, Lessons Learnd 등을 기록해 둔다.
+    - 프로젝트 폴더: git 관련 내용, 소스 코드, config. 파일들이 존재한다. 개발 문서는 해당 프로젝트 폴더 밑에 있는 docs 파일에 .md 파일로 저장한다.
+  * 위의 각 Agent 에게 할당된 LLM 모델 이름은 config. 파일 등을 통해 변경할 수 있다.

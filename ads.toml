@@ -1,0 +1,56 @@
+# ads (Audiso Development System) configuration. See plan §7.
+
+[ads]
+tmux_socket = "ads"
+tmux_prefix = "C-a"   # prefix of the ads tmux server (avoids clashing with an outer tmux)
+attach = true
+claude_bin = "claude"
+git_init = true
+
+[agents.orchestrator]
+model = "claude-opus-5-5"
+reports_to = "human"
+
+[agents.planner]
+model = "claude-fable-5-1"
+reports_to = "orchestrator"
+
+[agents.tester]
+model = "claude-sonnet-5-5"
+reports_to = "orchestrator"
+
+[agents.evaluator]
+model = "claude-fable-5-1"
+reports_to = "planner"
+
+[agents.developer]
+model = "claude-sonnet-5-5"
+reports_to = "orchestrator"
+
+[agents.coder-1]
+model = "claude-sonnet-5-5"
+reports_to = "developer"
+
+[agents.coder-2]
+model = "claude-sonnet-5-5"
+reports_to = "developer"
+
+# optional per agent: effort = "low" | "medium" | "high" | "xhigh" | "max"
+
+[delivery]
+tick_ms = 500
+paste_settle_ms = 150
+confirm_timeout_s = 10
+max_enter_retries = 2
+max_paste_retries = 3
+stale_busy_s = 600
+startup_timeout_s = 180
+dead_grace_s = 5
+
+[protocol]
+max_review_rounds = 3
+max_report_nudges = 2
+
+[editor]
+vi_mode = true
+history_file = "work/input_history"

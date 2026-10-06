@@ -1,0 +1,24 @@
+# ads (Audiso Development System) — Python requirements
+# Python >= 3.14 required.
+#
+# Install:
+#   python3.14 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+#   .venv/bin/pip install -e .          # provides the `ads` command
+#
+# System requirements (not installable via pip):
+#   - tmux >= 3.2            (tested with 3.4)
+#   - Claude Code CLI        (`claude`, tested with 2.1.289; logged in via `claude auth login`)
+#   - git                    (optional; used for new project folders)
+# Check everything with: .venv/bin/ads doctor
+
+# Runtime
+prompt_toolkit==3.0.53      # pane-3 editor (vi mode, multiline, history)
+wcwidth==0.9.2              # dependency of prompt_toolkit
+
+# Development / tests (pytest -q, tests/e2e/smoke_fake.sh)
+pytest==9.1.1
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.21.0

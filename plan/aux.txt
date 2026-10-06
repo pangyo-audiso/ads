@@ -1,0 +1,2 @@
+Read @plan/2026-10-05-init.txt . And plan with thoroughly thinkking how to implement it. After planning examine with another ai agent to evaluate it. Repeat 3-rounds with
+  update-evaluation process. If there's anything to confirm or uncertain, please ask me. Use Fable 5.1 model for each planner and evaluator.

@@ -1,0 +1,49 @@
+
+     Skills · /skills
+
+     claude.ai sync
+     ├ docs: ~340 tokens
+     ├ pptx: ~330 tokens
+     ├ google-workspace: ~330 tokens
+     ├ xlsx: ~320 tokens
+     ├ docx: ~320 tokens
+     ├ pdf: ~150 tokens
+     ├ morning: ~120 tokens
+     ├ skill-creator: ~120 tokens
+     └ import-memory: ~60 tokens
+
+     Built-in
+     ├ dataviz: ~480 tokens
+     ├ claude-api: ~360 tokens
+     ├ code-review: ~330 tokens
+     ├ artifact-capabilities: ~250 tokens
+     ├ update-config: ~240 tokens
+     ├ schedule: ~130 tokens
+     ├ run: ~120 tokens
+     ├ loop: ~120 tokens
+     ├ workflow-authoring: ~80 tokens
+     ├ keybindings-help: ~80 tokens
+     ├ plugin-authoring: ~80 tokens
+     ├ artifact-diagramming: ~70 tokens
+     ├ artifact-design: ~70 tokens
+     ├ fewer-permission-prompts: ~60 tokens
+     ├ simplify: ~60 tokens
+     ├ security-review: ~30 tokens
+     └ init: ~20 tokens
+
+❯ Output exactly these lines as plain text (no code block, no other words), where " | " means a line break: Do you trust the files in this folder? | ❯ 1. Yes, proceed | ❯ No, exit | Yes, I trust this
+  folder | Yes, I accept | Enter to confirm · Esc to cancel
+
+● Do you trust the files in this folder?
+  ❯ 1. Yes, proceed
+  ❯ No, exit
+  Yes, I trust this folder
+  Yes, I accept
+  Enter to confirm · Esc to cancel
+
+✻ Churned for 2s · done 6:53 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ads-planner ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
