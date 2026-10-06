@@ -1,12 +1,14 @@
 # M0.5 spike: real Claude Code in a private tmux server
 
+> **Path update (2026-10-06).** The spike ran on the original single-project layout. Paths below are given in the current per-project layout (`<rt>/projects/<name>/`, commit `00d0c47`); `<st>` stands for that state dir. The Claude Code observations themselves are unchanged.
+
 Date: 2026-10-05. Claude Code **2.1.289**, tmux 3.4, model `claude-sonnet-5-5`, pane 200x50.
 Server: `tmux -L ads-spike -f src/ads/tmux/ads.tmux.conf`. Launch: `ads.tmux.Tmux.respawn(pane, launcher.claude_argv(...), launcher.agent_env(...), project)`, cwd = fresh `mktemp -d /tmp/ads-spike-XXXXXX`.
 
 argv used (from `claude_argv`):
 ```
-claude --model claude-sonnet-5-5 --dangerously-skip-permissions --add-dir /home/dev1/workspace/vibe-coding
-  --settings <rt>/work/agents/planner/settings.json --append-system-prompt-file <rt>/work/agents/planner/system-prompt.md
+claude --model claude-sonnet-5-5 --dangerously-skip-permissions --add-dir <st>
+  --settings <st>/work/agents/planner/settings.json --append-system-prompt-file <st>/work/agents/planner/system-prompt.md
   --disallowedTools AskUserQuestion EnterPlanMode ExitPlanMode --name ads-planner --session-id <uuid4>
 ```
 All flags accepted. `--name ads-planner` is shown at the right end of the input box's top rule and in the hook payload as `session_title`.
@@ -84,7 +86,7 @@ Idle (`idle_input.txt`, `idle_input_startup.txt`), bottom of screen:
 - Busy began within 0.25 s of Enter; this tiny turn (Read + "pong") ended ~2.8 s after.
 - Newlines in the input box: **`C-j` works**, **`M-Enter` (Alt+Enter) works** (both give a second line, no submit). `C-c` clears the box (shows "Press Ctrl-C again to exit").
 
-## 4. Hooks (stub `ads hook <event>` → `work/logs/hooks.log`)
+## 4. Hooks (stub `ads hook <event>` → `<st>/work/logs/hooks.log`)
 Order observed (interactive): `SessionStart(source=startup)` fires **only after the dialogs are accepted** (≈0.5–1 s after the last Enter) → `UserPromptSubmit` → `Stop` per turn → `SessionEnd(reason=prompt_input_exit)` on `/exit`. `--resume` → `SessionStart(source=resume)`. `claude -p` fires all four, `SessionEnd.reason = other`.
 Local slash commands (`/context`, `/exit`) do **not** fire UserPromptSubmit/Stop. `kill-server` killing claude produced no SessionEnd line.
 
@@ -102,9 +104,9 @@ Payload keys actually observed:
 `/context all` → Memory files:
 ```
 ├ ~/.claude/CLAUDE.md: 180 tokens
-└ ~/workspace/vibe-coding/CLAUDE.md: 494 tokens
+└ <st>/CLAUDE.md: 494 tokens        (at the time: the runtime's ~/workspace/vibe-coding/CLAUDE.md)
 ```
-So the runtime CLAUDE.md **is loaded** via `--add-dir` + `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. Note the **user's global `~/.claude/CLAUDE.md` is loaded too** (smoke run answered "OK, 형님."): agents inherit the user's personal instructions (language, form of address).
+So the CLAUDE.md in the `--add-dir` directory **is loaded** via `--add-dir` + `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. Note the **user's global `~/.claude/CLAUDE.md` is loaded too** (smoke run answered "OK, 형님."): agents inherit the user's personal instructions (language, form of address). Today the `--add-dir` directory is the project's state dir, so each project's own `CLAUDE.md` (Lab Notes) is what gets loaded; the ads repo's `CLAUDE.md` is not.
 
 ## 6. Negative fixture
 `agent_output_dialog_text.txt`: the agent printed `Do you trust the files in this folder?`, `❯ 1. Yes, proceed`, `❯ No, exit`, `Yes, I trust this folder`, `Yes, I accept`, `Enter to confirm · Esc to cancel` as output (indented 2 spaces under `●`), with the idle input box below. A naive "`Enter to confirm` anywhere on screen" check misfired on the resumed session in the spike; dialog matching must require the last non-blank line to be the `Enter to confirm · Esc to cancel` footer **and** no `^❯\xa0` input box.
