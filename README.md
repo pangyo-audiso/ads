@@ -94,9 +94,11 @@ Models and timing are configured in `ads.toml` (shared by all projects).
 ## Docs
 
 - [docs/usage.md](docs/usage.md): starting, several projects, panes, editor keys, nested tmux, stop/resume
+- [docs/hotkeys.md](docs/hotkeys.md): cheat sheet of tmux keys (prefix `Ctrl+a`), editor keys, vi mode and `/ads` commands
 - [docs/protocol.md](docs/protocol.md): envelope, pointer, ledger rules (hold, supersede, down, nudge), state machine, delivery algorithm
 - [docs/troubleshooting.md](docs/troubleshooting.md): stuck agents, failed deliveries, restarts, logs, keyboard
 - [docs/spike-claude.md](docs/spike-claude.md): the Claude Code behaviour ads relies on (dialogs, input box, hooks)
+- [docs/demo-roguelike.md](docs/demo-roguelike.md): a demo project (ASCII roguelike) and step-by-step script that shows off every agent
 - [docs/e2e-report-2026-10-05.md](docs/e2e-report-2026-10-05.md): a real end-to-end run (plan → dev → test)
 
 ## Tests

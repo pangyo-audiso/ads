@@ -93,6 +93,8 @@ Each pane border shows `role [state]`, for example `planner [idle]` or `develope
 
 ## The human editor (window 0, pane 3)
 
+All keys on one page: [hotkeys.md](hotkeys.md).
+
 Type an instruction and press **Enter**. It goes to the orchestrator as an `instruct`. If the orchestrator has asked you a question, Enter sends your text as the answer instead, and the toolbar shows `answering Q m-…`. Start the text with `!` to send an instruct anyway.
 
 | key | effect |
@@ -112,6 +114,8 @@ The toolbar shows each agent's state, the current phase (`plan`/`dev`/`test`), q
 New instructions wait (`held`) while the orchestrator still has an instruct open. To cancel the running work and replace it, ask the orchestrator to supersede the open task.
 
 ## tmux keys and nested tmux
+
+Full key list: [hotkeys.md](hotkeys.md).
 
 The ads server uses prefix **C-a**, not tmux's default C-b. This lets ads run inside your own tmux, which keeps C-b. Change it with `[ads] tmux_prefix`. Useful keys: `C-a 0` / `C-a 1` / `C-a 2` switch windows, `C-a o` and arrow keys move between panes, `C-a z` zooms a pane, `C-a d` detaches (the cell keeps running), and mouse selection and scrolling are on.
 
